@@ -20,6 +20,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cloudinary = require('cloudinary').v2;
+const { createClient } = require('redis');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -27,6 +28,14 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
+// Configure Redis
+const redis = createClient({
+  url: process.env.REDIS_URL || 'redis://redis.railway.internal:6379',
+});
+
+redis.on('error', (err) => console.error('❌ Redis error:', err));
+redis.on('connect', () => console.log('✅ Connected to Redis'));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -41,16 +50,13 @@ const AI_STUDIO_REGION = process.env.AI_STUDIO_REGION || 'eu';
 // AI Studio API base URL based on region
 const AI_STUDIO_BASE_URL = `https://studio-api-${AI_STUDIO_REGION}.ai.vonage.com`;
 
-// Store active sessions - maps session_id to thread info
-// In production, use Redis or a database
-const SESSIONS = {};
-
 // Middleware
 app.use(express.json());
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', sessions: Object.keys(SESSIONS).length });
+app.get('/health', async (req, res) => {
+  const keys = await redis.keys('session:*');
+  res.json({ status: 'ok', sessions: keys.length });
 });
 
 /**
@@ -79,7 +85,7 @@ app.post('/start', async (req, res) => {
     if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
     messageText += `\n✅ React with :white_check_mark: to close`;
     if (transcription) messageText += `\n\nTranscription:${transcription}`;
-    messageText += `\n💬 Reply in this thread to respond`
+    messageText += `\n💬 Reply in this thread to respond`;
 
     // Use Slack API to get the message timestamp for threading
     const response = await axios.post(
@@ -102,7 +108,7 @@ app.post('/start', async (req, res) => {
 
     // Auto-create session with the thread timestamp
     const threadTs = response.data.ts;
-    newSession(sessionId, threadTs);
+    await saveSession(sessionId, threadTs);
     console.log(`✅ Conversation initiated in Slack, session ${sessionId} linked to thread ${threadTs}`);
 
     res.status(200).json({ status: 'success', message: 'Conversation started in Slack' });
@@ -124,7 +130,7 @@ app.post('/inbound', async (req, res) => {
 
     const sessionId = req.body.sessionId;
     const messageType = req.body.type || 'text';
-    const session = SESSIONS[sessionId];
+    const session = await getSession(sessionId);
 
     if (!session) {
       console.warn('⚠️ No session found for:', sessionId);
@@ -160,6 +166,14 @@ app.post('/inbound', async (req, res) => {
         slackMessage = {
           thread_ts: session.thread_ts,
           text: `📱 *Customer sent a video:*${videoCaption}\n${req.body.video.url}`
+        };
+        break;
+      }
+
+      case 'audio': {
+        slackMessage = {
+          thread_ts: session.thread_ts,
+          text: `📱 *Customer sent an audio message:*\n🎵 ${req.body.audio.url}`
         };
         break;
       }
@@ -236,7 +250,7 @@ async function handleMessage(event) {
   const threadTs = event.thread_ts;
 
   // Find session by thread
-  const session = findSessionByThread(threadTs);
+  const session = await getSessionByThread(threadTs);
   if (!session) {
     return;
   }
@@ -271,11 +285,11 @@ async function handleFileUpload(file, session, threadTs, caption) {
   try {
     const fileType = file.mimetype?.split('/')[0]; // 'image', 'video', 'audio', etc.
 
-    if (!['image', 'video'].includes(fileType)) {
+    if (!['image', 'video', 'audio'].includes(fileType)) {
       console.log(`⚠️ Unsupported file type: ${file.mimetype}`);
       await axios.post(SLACK_WEBHOOK_URL, {
         thread_ts: threadTs,
-        text: `⚠️ Cannot send ${file.mimetype} files to WhatsApp. Only images and videos are supported.`,
+        text: `⚠️ Cannot send ${file.mimetype} files to WhatsApp. Only images, videos, and audio are supported.`,
       });
       return;
     }
@@ -289,9 +303,10 @@ async function handleFileUpload(file, session, threadTs, caption) {
     });
 
     // Upload to Cloudinary
+    const resourceType = fileType === 'image' ? 'image' : 'video'; // Cloudinary uses 'video' for both video and audio
     const uploadResult = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
-        { resource_type: fileType === 'video' ? 'video' : 'image' },
+        { resource_type: resourceType },
         (error, result) => {
           if (error) reject(error);
           else resolve(result);
@@ -345,7 +360,7 @@ async function handleReaction(event) {
   const threadTs = event.item.ts;
 
   // Find session by thread
-  const session = findSessionByThread(threadTs);
+  const session = await getSessionByThread(threadTs);
   if (!session) {
     return;
   }
@@ -365,8 +380,8 @@ async function handleReaction(event) {
     text: `✅ *Ticket closed*`,
   });
 
-  // Clean up session
-  delete SESSIONS[session.session_id];
+  // Clean up session from Redis
+  await deleteSession(session.session_id, threadTs);
   console.log(`✅ Session ${session.session_id} closed`);
 }
 
@@ -408,37 +423,65 @@ function handleTranscription(transcription = []) {
   return formatted;
 }
 
+// ============================================
+// Redis Session Management
+// ============================================
+
 /**
- * Create a new session mapping
+ * Save a new session to Redis
  */
-function newSession(sessionId, threadTs) {
-  SESSIONS[sessionId] = {
+async function saveSession(sessionId, threadTs) {
+  const session = {
     session_id: sessionId,
     thread_ts: threadTs,
     created_at: new Date().toISOString(),
   };
+
+  // Store by session ID
+  await redis.set(`session:${sessionId}`, JSON.stringify(session));
+  // Store reverse lookup by thread timestamp
+  await redis.set(`thread:${threadTs}`, sessionId);
+
+  return session;
 }
 
 /**
- * Find session by Slack thread timestamp (reverse lookup)
+ * Get session by session ID
  */
-function findSessionByThread(threadTs) {
-  for (const sessionId in SESSIONS) {
-    if (SESSIONS[sessionId].thread_ts === threadTs) {
-      return SESSIONS[sessionId];
-    }
-  }
-  return null;
+async function getSession(sessionId) {
+  const data = await redis.get(`session:${sessionId}`);
+  return data ? JSON.parse(data) : null;
+}
+
+/**
+ * Get session by Slack thread timestamp
+ */
+async function getSessionByThread(threadTs) {
+  const sessionId = await redis.get(`thread:${threadTs}`);
+  if (!sessionId) return null;
+  return getSession(sessionId);
+}
+
+/**
+ * Delete session from Redis
+ */
+async function deleteSession(sessionId, threadTs) {
+  await redis.del(`session:${sessionId}`);
+  await redis.del(`thread:${threadTs}`);
 }
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`
+async function startServer() {
+  await redis.connect();
+
+  app.listen(PORT, () => {
+    console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║     WhatsApp to Slack Integration Server                  ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Server running on port ${PORT}                              ║
 ║  AI Studio Region: ${AI_STUDIO_REGION.toUpperCase()}                                    ║
+║  Redis: Connected                                         ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Endpoints:                                               ║
 ║  • POST /start        - AI Studio live agent start        ║
@@ -446,5 +489,8 @@ app.listen(PORT, () => {
 ║  • POST /slack/events - Slack Events API                  ║
 ║  • GET  /health       - Health check                      ║
 ╚═══════════════════════════════════════════════════════════╝
-  `);
-});
+    `);
+  });
+}
+
+startServer().catch(console.error);
