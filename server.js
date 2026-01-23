@@ -19,6 +19,14 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const cloudinary = require('cloudinary').v2;
+
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -68,9 +76,10 @@ app.post('/start', async (req, res) => {
     messageText += `👤 *${profileName}*`;
     if (phoneNumber) messageText += ` (${phoneNumber})`;
     messageText += `\n`;
-    if (initialMessage) messageText += `💬 _"${initialMessage}"_\n`;
+    if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
     messageText += `\n✅ React with :white_check_mark: to close`;
     if (transcription) messageText += `\n\nTranscription:${transcription}`;
+    messageText += `\n💬 Reply in this thread to respond`
 
     // Use Slack API to get the message timestamp for threading
     const response = await axios.post(
@@ -215,7 +224,7 @@ app.post('/slack/events', async (req, res) => {
  */
 async function handleMessage(event) {
   // Ignore bot messages
-  if (event.bot_id || event.subtype) {
+  if (event.bot_id || event.subtype === 'bot_message') {
     return;
   }
 
@@ -225,7 +234,6 @@ async function handleMessage(event) {
   }
 
   const threadTs = event.thread_ts;
-  const message = event.text;
 
   // Find session by thread
   const session = findSessionByThread(threadTs);
@@ -233,9 +241,20 @@ async function handleMessage(event) {
     return;
   }
 
+  // Handle file uploads
+  if (event.files && event.files.length > 0) {
+    for (const file of event.files) {
+      await handleFileUpload(file, session, threadTs, event.text);
+    }
+    return;
+  }
+
+  // Handle text messages
+  const message = event.text;
+  if (!message) return;
+
   console.log(`📤 Auto-forwarding message to WhatsApp for session ${session.session_id}`);
 
-  // Send to AI Studio (which forwards to WhatsApp)
   await axios.post(
     `${AI_STUDIO_BASE_URL}/live-agent/outbound/${session.session_id}`,
     { message_type: 'text', text: message },
@@ -243,6 +262,74 @@ async function handleMessage(event) {
   );
 
   console.log('✅ Message sent to WhatsApp');
+}
+
+/**
+ * Handle file uploads from Slack - upload to Cloudinary and send to WhatsApp
+ */
+async function handleFileUpload(file, session, threadTs, caption) {
+  try {
+    const fileType = file.mimetype?.split('/')[0]; // 'image', 'video', 'audio', etc.
+
+    if (!['image', 'video'].includes(fileType)) {
+      console.log(`⚠️ Unsupported file type: ${file.mimetype}`);
+      await axios.post(SLACK_WEBHOOK_URL, {
+        thread_ts: threadTs,
+        text: `⚠️ Cannot send ${file.mimetype} files to WhatsApp. Only images and videos are supported.`,
+      });
+      return;
+    }
+
+    console.log(`📤 Uploading ${fileType} to Cloudinary...`);
+
+    // Download file from Slack (requires bot token for private files)
+    const fileResponse = await axios.get(file.url_private_download || file.url_private, {
+      headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` },
+      responseType: 'arraybuffer',
+    });
+
+    // Upload to Cloudinary
+    const uploadResult = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { resource_type: fileType === 'video' ? 'video' : 'image' },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      uploadStream.end(Buffer.from(fileResponse.data));
+    });
+
+    console.log(`✅ Uploaded to Cloudinary: ${uploadResult.secure_url}`);
+
+    // Send to Vonage AI Studio
+    const payload = {
+      message_type: fileType,
+      [fileType]: {
+        url: uploadResult.secure_url,
+      },
+    };
+
+    // Add caption if provided
+    if (caption) {
+      payload[fileType].caption = caption;
+    }
+
+    await axios.post(
+      `${AI_STUDIO_BASE_URL}/live-agent/outbound/${session.session_id}`,
+      payload,
+      { headers: { 'X-Vgai-Key': AI_STUDIO_KEY } }
+    );
+
+    console.log(`✅ ${fileType} sent to WhatsApp`);
+
+  } catch (error) {
+    console.error(`❌ Error handling file upload:`, error.message);
+    await axios.post(SLACK_WEBHOOK_URL, {
+      thread_ts: threadTs,
+      text: `❌ Failed to send file to WhatsApp: ${error.message}`,
+    });
+  }
 }
 
 /**
