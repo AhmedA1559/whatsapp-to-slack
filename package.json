@@ -1,0 +1,30 @@
+{
+  "name": "whatsapp-to-slack",
+  "version": "1.0.0",
+  "description": "Integrate inbound WhatsApp messages (via Vonage AI Studio) with outbound Slack notifications for customer support",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "tunnel": "npx localtunnel --port 3000"
+  },
+  "keywords": [
+    "vonage",
+    "whatsapp",
+    "slack",
+    "ai-studio",
+    "customer-support",
+    "integration"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "body-parser": "^2.2.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1"
+  }
+}
