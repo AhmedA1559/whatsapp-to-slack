@@ -57,9 +57,20 @@ app.post('/start', async (req, res) => {
 
     const sessionId = req.body.sessionId;
     const transcription = handleTranscription(req.body.history?.transcription);
-    const userNumber = req.body.sender || 'Unknown';
 
-    const messageText = `🆕 *New WhatsApp Support Request*\n\nFrom: ${userNumber}\n\n💬 Reply in this thread to respond\n✅ React with :white_check_mark: to close\n\nTranscription:${transcription || '\n_No previous messages_'}`;
+    // Extract parameters from history
+    const params = extractParameters(req.body.history?.parameters);
+    const profileName = params.PROFILE_NAME || 'Unknown';
+    const phoneNumber = params.SENDER_PHONE_NUMBER || '';
+    const initialMessage = params.INITIAL_MESSAGE || '';
+
+    let messageText = `🆕 *New WhatsApp Support Request*\n\n`;
+    messageText += `👤 *${profileName}*`;
+    if (phoneNumber) messageText += ` (${phoneNumber})`;
+    messageText += `\n`;
+    if (initialMessage) messageText += `💬 _"${initialMessage}"_\n`;
+    messageText += `\n✅ React with :white_check_mark: to close`;
+    if (transcription) messageText += `\n\nTranscription:${transcription}`;
 
     // Use Slack API to get the message timestamp for threading
     const response = await axios.post(
@@ -96,13 +107,14 @@ app.post('/start', async (req, res) => {
  * /inbound - Called by AI Studio when user sends a message during live agent session
  *
  * Forwards the WhatsApp user's message to the appropriate Slack thread.
+ * Handles text, image, and video messages.
  */
 app.post('/inbound', async (req, res) => {
   try {
     console.log('📥 Inbound message received:', JSON.stringify(req.body, null, 2));
 
-    const message = req.body.text;
     const sessionId = req.body.sessionId;
+    const messageType = req.body.type || 'text';
     const session = SESSIONS[sessionId];
 
     if (!session) {
@@ -111,13 +123,47 @@ app.post('/inbound', async (req, res) => {
       return;
     }
 
-    const data = {
-      thread_ts: session.thread_ts,
-      text: `📱 *Customer:*\n${message}`,
-    };
+    let slackMessage;
 
-    await axios.post(SLACK_WEBHOOK_URL, data);
-    console.log('✅ User message forwarded to Slack thread');
+    switch (messageType) {
+      case 'image': {
+        const imageCaption = req.body.image.caption ? `\n"${req.body.image.caption}"` : '';
+        slackMessage = {
+          thread_ts: session.thread_ts,
+          text: `📱 *Customer sent an image:*${imageCaption}`,
+          blocks: [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: `📱 *Customer sent an image:*${imageCaption}` }
+            },
+            {
+              type: 'image',
+              image_url: req.body.image.url,
+              alt_text: req.body.image.caption || req.body.image.name
+            }
+          ]
+        };
+        break;
+      }
+
+      case 'video': {
+        const videoCaption = req.body.video.caption ? `\n"${req.body.video.caption}"` : '';
+        slackMessage = {
+          thread_ts: session.thread_ts,
+          text: `📱 *Customer sent a video:*${videoCaption}\n${req.body.video.url}`
+        };
+        break;
+      }
+
+      default: // text
+        slackMessage = {
+          thread_ts: session.thread_ts,
+          text: `📱 *Customer:*\n${req.body.text}`
+        };
+    }
+
+    await axios.post(SLACK_WEBHOOK_URL, slackMessage);
+    console.log(`✅ ${messageType} message forwarded to Slack thread`);
 
     res.status(200).json({ status: 'success' });
   } catch (error) {
@@ -240,6 +286,21 @@ async function handleReaction(event) {
 // ============================================
 // Helper Functions
 // ============================================
+
+/**
+ * Extract parameters from AI Studio history into a key-value object
+ */
+function extractParameters(parameters = []) {
+  const result = {};
+  if (!parameters || !parameters.length) return result;
+
+  for (const param of parameters) {
+    if (param.name && param.value) {
+      result[param.name] = param.value;
+    }
+  }
+  return result;
+}
 
 /**
  * Format transcription history for Slack display
