@@ -50,6 +50,50 @@ const AI_STUDIO_REGION = process.env.AI_STUDIO_REGION || 'eu';
 // AI Studio API base URL based on region
 const AI_STUDIO_BASE_URL = `https://studio-api-${AI_STUDIO_REGION}.ai.vonage.com`;
 
+// ============================================
+// Translatable Strings
+// ============================================
+const STRINGS = {
+  // New ticket message
+  newRequest: '🆕 *New WhatsApp Support Request*',
+  reactToClose: '✅ React with :white_check_mark: to close',
+  replyInThread: '💬 Reply in this thread to respond',
+  transcriptionHeader: 'Transcription:',
+  noMessages: '_No previous messages_',
+
+  // User types (incumbency)
+  userTypes: {
+    'new_student': '🆕 New Student',
+    'current_student': '📚 Current Student',
+    'prospective': '👀 Prospective',
+  },
+
+  // School types
+  schoolTypes: {
+    'academy': '🎓 Academy',
+    'daycare': '👶 Daycare',
+  },
+
+  // Inbound messages from customer
+  customerImage: '📱 *Customer sent an image:*',
+  customerVideo: '📱 *Customer sent a video:*',
+  customerAudio: '📱 *Customer sent an audio message:*',
+  customerText: '📱 *Customer:*',
+
+  // Status messages
+  ticketClosed: '✅ *Ticket closed*',
+  messageSentToWhatsApp: '✅ _Message sent to WhatsApp_',
+
+  // Errors
+  unsupportedFileType: '⚠️ Cannot send {type} files to WhatsApp. Only images, videos, and audio are supported.',
+  failedToSendFile: '❌ Failed to send file to WhatsApp: {error}',
+  sessionNotFound: 'Session not found',
+
+  // Transcription roles
+  botRole: '🤖 Bot',
+  userRole: '👤 User',
+};
+
 // Middleware
 app.use(express.json());
 
@@ -80,22 +124,11 @@ app.post('/start', async (req, res) => {
     const incumbency = params['USER.incumbency'] || '';
     const school = params['USER.school'] || '';
 
-    // Format user type
-    const userTypeMap = {
-      'new_student': '🆕 New Student',
-      'current_student': '📚 Current Student',
-      'prospective': '👀 Prospective',
-    };
-    const userType = userTypeMap[incumbency] || incumbency;
+    // Format user type and school
+    const userType = STRINGS.userTypes[incumbency] || incumbency;
+    const schoolType = STRINGS.schoolTypes[school] || school;
 
-    // Format school
-    const schoolMap = {
-      'academy': '🎓 Academy',
-      'daycare': '👶 Daycare',
-    };
-    const schoolType = schoolMap[school] || school;
-
-    let messageText = `🆕 *New WhatsApp Support Request*\n\n`;
+    let messageText = `${STRINGS.newRequest}\n\n`;
     messageText += `👤 *${profileName}*`;
     if (phoneNumber) messageText += ` (${phoneNumber})`;
     messageText += `\n`;
@@ -104,9 +137,9 @@ app.post('/start', async (req, res) => {
     if (schoolType) messageText += `${schoolType}`;
     if (userType || schoolType) messageText += `\n`;
     if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
-    messageText += `\n✅ React with :white_check_mark: to close`;
-    if (transcription) messageText += `\n\nTranscription:${transcription}`;
-    messageText += `\n💬 Reply in this thread to respond`;
+    messageText += `\n${STRINGS.reactToClose}`;
+    if (transcription) messageText += `\n\n${STRINGS.transcriptionHeader}${transcription}`;
+    messageText += `\n${STRINGS.replyInThread}`;
 
     // Use Slack API to get the message timestamp for threading
     const response = await axios.post(
@@ -155,7 +188,7 @@ app.post('/inbound', async (req, res) => {
 
     if (!session) {
       console.warn('⚠️ No session found for:', sessionId);
-      res.status(200).json({ status: 'warning', message: 'Session not found' });
+      res.status(200).json({ status: 'warning', message: STRINGS.sessionNotFound });
       return;
     }
 
@@ -166,11 +199,11 @@ app.post('/inbound', async (req, res) => {
         const imageCaption = req.body.image.caption ? `\n"${req.body.image.caption}"` : '';
         slackMessage = {
           thread_ts: session.thread_ts,
-          text: `📱 *Customer sent an image:*${imageCaption}`,
+          text: `${STRINGS.customerImage}${imageCaption}`,
           blocks: [
             {
               type: 'section',
-              text: { type: 'mrkdwn', text: `📱 *Customer sent an image:*${imageCaption}` }
+              text: { type: 'mrkdwn', text: `${STRINGS.customerImage}${imageCaption}` }
             },
             {
               type: 'image',
@@ -186,7 +219,7 @@ app.post('/inbound', async (req, res) => {
         const videoCaption = req.body.video.caption ? `\n"${req.body.video.caption}"` : '';
         slackMessage = {
           thread_ts: session.thread_ts,
-          text: `📱 *Customer sent a video:*${videoCaption}\n${req.body.video.url}`
+          text: `${STRINGS.customerVideo}${videoCaption}\n${req.body.video.url}`
         };
         break;
       }
@@ -194,7 +227,7 @@ app.post('/inbound', async (req, res) => {
       case 'audio': {
         slackMessage = {
           thread_ts: session.thread_ts,
-          text: `📱 *Customer sent an audio message:*\n🎵 ${req.body.audio.url}`
+          text: `${STRINGS.customerAudio}\n🎵 ${req.body.audio.url}`
         };
         break;
       }
@@ -202,7 +235,7 @@ app.post('/inbound', async (req, res) => {
       default: // text
         slackMessage = {
           thread_ts: session.thread_ts,
-          text: `📱 *Customer:*\n${req.body.text}`
+          text: `${STRINGS.customerText}\n${req.body.text}`
         };
     }
 
@@ -310,7 +343,7 @@ async function handleFileUpload(file, session, threadTs, caption) {
       console.log(`⚠️ Unsupported file type: ${file.mimetype}`);
       await axios.post(SLACK_WEBHOOK_URL, {
         thread_ts: threadTs,
-        text: `⚠️ Cannot send ${file.mimetype} files to WhatsApp. Only images, videos, and audio are supported.`,
+        text: STRINGS.unsupportedFileType.replace('{type}', file.mimetype),
       });
       return;
     }
@@ -363,7 +396,7 @@ async function handleFileUpload(file, session, threadTs, caption) {
     console.error(`❌ Error handling file upload:`, error.message);
     await axios.post(SLACK_WEBHOOK_URL, {
       thread_ts: threadTs,
-      text: `❌ Failed to send file to WhatsApp: ${error.message}`,
+      text: STRINGS.failedToSendFile.replace('{error}', error.message),
     });
   }
 }
@@ -398,7 +431,7 @@ async function handleReaction(event) {
   // Post closure message in thread
   await axios.post(SLACK_WEBHOOK_URL, {
     thread_ts: threadTs,
-    text: `✅ *Ticket closed*`,
+    text: STRINGS.ticketClosed,
   });
 
   // Clean up session from Redis
@@ -435,7 +468,9 @@ function handleTranscription(transcription = []) {
 
   for (const message of transcription) {
     for (const key in message) {
-      const role = key === 'BOT' ? '🤖 Bot' : '👤 User';
+      const keyUpper = key.toUpperCase();
+      const isBot = keyUpper === 'BOT' || keyUpper === 'AGENT' || keyUpper === 'ASSISTANT';
+      const role = isBot ? STRINGS.botRole : STRINGS.userRole;
       formatted += `\n${role}: ${message[key]}`;
     }
   }
