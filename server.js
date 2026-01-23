@@ -77,11 +77,32 @@ app.post('/start', async (req, res) => {
     const profileName = params.PROFILE_NAME || 'Unknown';
     const phoneNumber = params.SENDER_PHONE_NUMBER || '';
     const initialMessage = params.INITIAL_MESSAGE || '';
+    const incumbency = params['USER.incumbency'] || '';
+    const school = params['USER.school'] || '';
+
+    // Format user type
+    const userTypeMap = {
+      'new_student': '🆕 New Student',
+      'current_student': '📚 Current Student',
+      'prospective': '👀 Prospective',
+    };
+    const userType = userTypeMap[incumbency] || incumbency;
+
+    // Format school
+    const schoolMap = {
+      'academy': '🎓 Academy',
+      'daycare': '👶 Daycare',
+    };
+    const schoolType = schoolMap[school] || school;
 
     let messageText = `🆕 *New WhatsApp Support Request*\n\n`;
     messageText += `👤 *${profileName}*`;
     if (phoneNumber) messageText += ` (${phoneNumber})`;
     messageText += `\n`;
+    if (userType) messageText += `${userType}`;
+    if (userType && schoolType) messageText += ` • `;
+    if (schoolType) messageText += `${schoolType}`;
+    if (userType || schoolType) messageText += `\n`;
     if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
     messageText += `\n✅ React with :white_check_mark: to close`;
     if (transcription) messageText += `\n\nTranscription:${transcription}`;
