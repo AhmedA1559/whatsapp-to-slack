@@ -339,17 +339,56 @@ app.post('/slack/assign', async (req, res) => {
       });
     }
 
-    // Extract user ID from mention anywhere in the text (format: <@U123456> or <@U123456|display name>)
-    const userIdMatch = text.match(/<@([A-Z0-9]+)(\|[^>]+)?>/i);
-    console.log(text);
-    if (!userIdMatch) {
-      return res.json({
-        response_type: 'ephemeral',
-        text: '❌ Please mention a user with @username\nExample: `/assign academy new_student @john`',
-      });
-    }
+    // Extract user ID from mention
+    let userId;
 
-    const userId = userIdMatch[1];
+    // Try formatted mention first: <@U123456> or <@U123456|display name>
+    const formattedMatch = text.match(/<@([A-Z0-9]+)(\|[^>]+)?>/i);
+    if (formattedMatch) {
+      userId = formattedMatch[1];
+    } else {
+      // Try plain @username format
+      const plainMatch = text.match(/@(\S+)/);
+      if (!plainMatch) {
+        return res.json({
+          response_type: 'ephemeral',
+          text: '❌ Please mention a user with @username\nExample: `/assign academy new_student @john`',
+        });
+      }
+
+      // Look up user by username via Slack API
+      const username = plainMatch[1];
+      try {
+        const lookupResponse = await axios.get(
+          `https://slack.com/api/users.list`,
+          { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` } }
+        );
+
+        if (!lookupResponse.data.ok) {
+          throw new Error(lookupResponse.data.error);
+        }
+
+        const user = lookupResponse.data.members.find(
+          m => m.name === username ||
+               m.profile?.display_name?.toLowerCase() === username.toLowerCase() ||
+               m.real_name?.toLowerCase() === username.toLowerCase()
+        );
+
+        if (!user) {
+          return res.json({
+            response_type: 'ephemeral',
+            text: `❌ User "${username}" not found. Make sure to use their Slack username.`,
+          });
+        }
+
+        userId = user.id;
+      } catch (err) {
+        return res.json({
+          response_type: 'ephemeral',
+          text: `❌ Error looking up user: ${err.message}`,
+        });
+      }
+    }
     await redis.set(`assign:${school}:${userType}`, userId);
 
     const schoolLabel = STRINGS.schoolTypes[school] || school;
