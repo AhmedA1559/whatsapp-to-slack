@@ -92,10 +92,13 @@ const STRINGS = {
   // Transcription roles
   botRole: '🤖 Bot',
   userRole: '👤 User',
+
+  assignedTo: '👋 Assigned to'
 };
 
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
@@ -128,6 +131,9 @@ app.post('/start', async (req, res) => {
     const userType = STRINGS.userTypes[incumbency] || incumbency;
     const schoolType = STRINGS.schoolTypes[school] || school;
 
+    // Look up assigned user
+    const assigneeId = await getAssignee(school, incumbency);
+
     let messageText = `${STRINGS.newRequest}\n\n`;
     messageText += `👤 *${profileName}*`;
     if (phoneNumber) messageText += ` (${phoneNumber})`;
@@ -136,6 +142,7 @@ app.post('/start', async (req, res) => {
     if (userType && schoolType) messageText += ` • `;
     if (schoolType) messageText += `${schoolType}`;
     if (userType || schoolType) messageText += `\n`;
+    if (assigneeId) messageText += `\n${STRINGS.assignedTo} <@${assigneeId}>\n`;
     if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
     messageText += `\n${STRINGS.reactToClose}`;
     if (transcription) messageText += `\n\n${STRINGS.transcriptionHeader}${transcription}`;
@@ -246,6 +253,119 @@ app.post('/inbound', async (req, res) => {
   } catch (error) {
     console.error('❌ Error in /inbound:', error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * /slack/assign - Slash command to assign users to ticket types
+ *
+ * Usage:
+ *   /assign academy new_student @user - Assign user to academy new students
+ *   /assign daycare current_student @user - Assign user to daycare current students
+ *   /assign list - Show all assignments
+ *   /assign clear academy new_student - Remove an assignment
+ */
+app.post('/slack/assign', async (req, res) => {
+  try {
+    const text = req.body.text?.trim() || '';
+    const parts = text.split(/\s+/);
+    const command = parts[0]?.toLowerCase();
+
+    // Show help
+    if (command === 'help' || !command) {
+      return res.json({
+        response_type: 'ephemeral',
+        text: `📖 */assign* - Manage ticket assignments\n\n` +
+          `*Commands:*\n` +
+          `• \`/assign <school> <user_type> @user\` - Assign a user\n` +
+          `• \`/assign list\` - Show all assignments\n` +
+          `• \`/assign clear <school> <user_type>\` - Remove assignment\n` +
+          `• \`/assign help\` - Show this help\n\n` +
+          `*Schools:* \`academy\`, \`daycare\`\n` +
+          `*User types:* \`new_student\`, \`current_student\`, \`prospective\`\n\n` +
+          `*Examples:*\n` +
+          `• \`/assign academy new_student @john\`\n` +
+          `• \`/assign daycare current_student @jane\``,
+      });
+    }
+
+    // List all assignments
+    if (command === 'list') {
+      const assignments = await getAllAssignments();
+      if (Object.keys(assignments).length === 0) {
+        return res.json({
+          response_type: 'ephemeral',
+          text: '📋 *No assignments configured*\n\nUse `/assign <school> <user_type> @user` to create one.',
+        });
+      }
+
+      let response = '📋 *Current Assignments:*\n\n';
+      for (const [key, userId] of Object.entries(assignments)) {
+        const [school, userType] = key.split(':');
+        const schoolLabel = STRINGS.schoolTypes[school] || school;
+        const userTypeLabel = STRINGS.userTypes[userType] || userType;
+        response += `• ${schoolLabel} + ${userTypeLabel} → <@${userId}>\n`;
+      }
+      return res.json({ response_type: 'ephemeral', text: response });
+    }
+
+    // Clear an assignment
+    if (command === 'clear') {
+      const school = parts[1]?.toLowerCase();
+      const userType = parts[2]?.toLowerCase();
+
+      if (!school || !userType) {
+        return res.json({
+          response_type: 'ephemeral',
+          text: '❌ Usage: `/assign clear <school> <user_type>`\nExample: `/assign clear academy new_student`\n\nType `/assign help` for more info.',
+        });
+      }
+
+      await redis.del(`assign:${school}:${userType}`);
+      return res.json({
+        response_type: 'in_channel',
+        text: `✅ Cleared assignment for ${school} + ${userType}`,
+      });
+    }
+
+    // Create an assignment: /assign <school> <user_type> @user
+    const school = parts[0]?.toLowerCase();
+    const userType = parts[1]?.toLowerCase();
+    const userMention = parts[2];
+
+    if (!school || !userType || !userMention) {
+      return res.json({
+        response_type: 'ephemeral',
+        text: '❌ Usage: `/assign <school> <user_type> @user`\nExample: `/assign academy new_student @john`\n\nType `/assign help` for more info.',
+      });
+    }
+
+    // Extract user ID from mention (format: <@U123456>)
+    const userIdMatch = userMention.match(/<@([A-Z0-9]+)(\|[^>]+)?>/);
+    if (!userIdMatch) {
+      return res.json({
+        response_type: 'ephemeral',
+        text: '❌ Please mention a user with @username',
+      });
+    }
+
+    const userId = userIdMatch[1];
+    await redis.set(`assign:${school}:${userType}`, userId);
+
+    const schoolLabel = STRINGS.schoolTypes[school] || school;
+    const userTypeLabel = STRINGS.userTypes[userType] || userType;
+
+    return res.json({
+      response_type: 'in_channel',
+      text: `✅ Assigned <@${userId}> to handle ${schoolLabel} + ${userTypeLabel} tickets`,
+    });
+
+  } catch (error) {
+    console.error('❌ Error in /slack/assign:', error.message);
+    return res.json({
+      response_type: 'ephemeral',
+      text: `❌ Error: ${error.message}`,
+    });
   }
 });
 
@@ -480,6 +600,53 @@ function handleTranscription(transcription = []) {
 }
 
 // ============================================
+// Redis Assignment Management
+// ============================================
+
+/**
+ * Get all assignments from Redis
+ */
+async function getAllAssignments() {
+  const keys = await redis.keys('assign:*');
+  const assignments = {};
+
+  for (const key of keys) {
+    const userId = await redis.get(key);
+    const shortKey = key.replace('assign:', '');
+    assignments[shortKey] = userId;
+  }
+
+  return assignments;
+}
+
+/**
+ * Get assignee for a school/userType combination
+ */
+async function getAssignee(school, userType) {
+  if (!school && !userType) return null;
+
+  // Try exact match first
+  if (school && userType) {
+    const exact = await redis.get(`assign:${school}:${userType}`);
+    if (exact) return exact;
+  }
+
+  // Try school-only match
+  if (school) {
+    const schoolOnly = await redis.get(`assign:${school}:*`);
+    if (schoolOnly) return schoolOnly;
+  }
+
+  // Try userType-only match
+  if (userType) {
+    const userTypeOnly = await redis.get(`assign:*:${userType}`);
+    if (userTypeOnly) return userTypeOnly;
+  }
+
+  return null;
+}
+
+// ============================================
 // Redis Session Management
 // ============================================
 
@@ -540,10 +707,11 @@ async function startServer() {
 ║  Redis: Connected                                         ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Endpoints:                                               ║
-║  • POST /start        - AI Studio live agent start        ║
-║  • POST /inbound      - AI Studio inbound messages        ║
-║  • POST /slack/events - Slack Events API                  ║
-║  • GET  /health       - Health check                      ║
+║  • POST /start         - AI Studio live agent start       ║
+║  • POST /inbound       - AI Studio inbound messages       ║
+║  • POST /slack/events  - Slack Events API                 ║
+║  • POST /slack/assign  - Assignment slash command         ║
+║  • GET  /health        - Health check                     ║
 ╚═══════════════════════════════════════════════════════════╝
     `);
   });
