@@ -331,21 +331,21 @@ app.post('/slack/assign', async (req, res) => {
     // Create an assignment: /assign <school> <user_type> @user
     const school = parts[0]?.toLowerCase();
     const userType = parts[1]?.toLowerCase();
-    const userMention = parts[2];
 
-    if (!school || !userType || !userMention) {
+    if (!school || !userType) {
       return res.json({
         response_type: 'ephemeral',
         text: '❌ Usage: `/assign <school> <user_type> @user`\nExample: `/assign academy new_student @john`\n\nType `/assign help` for more info.',
       });
     }
 
-    // Extract user ID from mention (format: <@U123456>)
-    const userIdMatch = userMention.match(/<@([A-Z0-9]+)(\|[^>]+)?>/);
+    // Extract user ID from mention anywhere in the text (format: <@U123456> or <@U123456|display name>)
+    const userIdMatch = text.match(/<@([A-Z0-9]+)(\|[^>]+)?>/i);
+    console.log(text);
     if (!userIdMatch) {
       return res.json({
         response_type: 'ephemeral',
-        text: '❌ Please mention a user with @username',
+        text: '❌ Please mention a user with @username\nExample: `/assign academy new_student @john`',
       });
     }
 
