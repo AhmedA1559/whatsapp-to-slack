@@ -392,7 +392,7 @@ app.post('/slack/assign', async (req, res) => {
     await redis.set(`assign:${school}:${userType}`, userId);
 
     const schoolLabel = STRINGS.schoolTypes[school] || school;
-    const userTypeLabel = STRINGS.userTypes[userType] || userType;
+    const userTypeLabel = STRINGS.intentTypes[userType] || userType;
 
     return res.json({
       response_type: 'in_channel',
