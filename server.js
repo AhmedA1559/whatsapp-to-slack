@@ -131,8 +131,8 @@ app.post('/start', async (req, res) => {
     const intentType = STRINGS.intentTypes[intent] || intent;
     const schoolType = STRINGS.schoolTypes[school] || school;
 
-    // Look up assigned user
-    const assigneeId = await getAssignee(school, intent);
+    // Look up assigned users
+    const assigneeIds = await getAssignees(school, intent);
 
     let messageText = `${STRINGS.newRequest}\n\n`;
     messageText += `👤 *${profileName}*`;
@@ -142,7 +142,10 @@ app.post('/start', async (req, res) => {
     if (intentType && schoolType) messageText += ` • `;
     if (schoolType) messageText += `${schoolType}`;
     if (intentType || schoolType) messageText += `\n`;
-    if (assigneeId) messageText += `\n${STRINGS.assignedTo} <@${assigneeId}>\n`;
+    if (assigneeIds.length > 0) {
+      const mentions = assigneeIds.map(id => `<@${id}>`).join(', ');
+      messageText += `\n${STRINGS.assignedTo} ${mentions}\n`;
+    }
     if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
     messageText += `\n${STRINGS.reactToClose}`;
     if (transcription) messageText += `\n\n${STRINGS.transcriptionHeader}${transcription}`;
@@ -277,15 +280,17 @@ app.post('/slack/assign', async (req, res) => {
         response_type: 'ephemeral',
         text: `📖 */assign* - Manage ticket assignments\n\n` +
           `*Commands:*\n` +
-          `• \`/assign <school> <intent> @user\` - Assign a user\n` +
+          `• \`/assign <school> <intent> @user @user2\` - Assign users\n` +
           `• \`/assign list\` - Show all assignments\n` +
-          `• \`/assign clear <school> <intent>\` - Remove assignment\n` +
+          `• \`/assign clear <school> <intent>\` - Remove all\n` +
+          `• \`/assign clear <school> <intent> @user\` - Remove specific user\n` +
           `• \`/assign help\` - Show this help\n\n` +
           `*Schools:* \`academy\`, \`daycare\`\n` +
           `*Intents:* \`registration\`, \`payment\`, \`inquiry\`\n\n` +
           `*Examples:*\n` +
-          `• \`/assign academy registration @john\`\n` +
-          `• \`/assign daycare payment @jane\``,
+          `• \`/assign academy registration @john @jane\`\n` +
+          `• \`/assign daycare payment @jane\`\n` +
+          `• \`/assign clear academy registration @john\``,
       });
     }
 
@@ -300,11 +305,12 @@ app.post('/slack/assign', async (req, res) => {
       }
 
       let response = '📋 *Current Assignments:*\n\n';
-      for (const [key, userId] of Object.entries(assignments)) {
+      for (const [key, userIds] of Object.entries(assignments)) {
         const [school, intent] = key.split(':');
         const schoolLabel = STRINGS.schoolTypes[school] || school;
         const intentLabel = STRINGS.intentTypes[intent] || intent;
-        response += `• ${schoolLabel} + ${intentLabel} → <@${userId}>\n`;
+        const mentions = userIds.map(id => `<@${id}>`).join(', ');
+        response += `• ${schoolLabel} + ${intentLabel} → ${mentions}\n`;
       }
       return res.json({ response_type: 'ephemeral', text: response });
     }
@@ -317,18 +323,34 @@ app.post('/slack/assign', async (req, res) => {
       if (!school || !userType) {
         return res.json({
           response_type: 'ephemeral',
-          text: '❌ Usage: `/assign clear <school> <intent>`\nExample: `/assign clear academy registration`\n\nType `/assign help` for more info.',
+          text: '❌ Usage:\n`/assign clear <school> <intent>` - Remove all\n`/assign clear <school> <intent> @user` - Remove specific user\n\nType `/assign help` for more info.',
         });
       }
 
+      // Check if a specific user is mentioned
+      const userIds = await resolveUsers(text);
+
+      if (userIds.length > 0) {
+        // Remove specific users
+        for (const uid of userIds) {
+          await redis.sRem(`assign:${school}:${userType}`, uid);
+        }
+        const mentions = userIds.map(id => `<@${id}>`).join(', ');
+        return res.json({
+          response_type: 'in_channel',
+          text: `✅ Removed ${mentions} from ${school} + ${userType}`,
+        });
+      }
+
+      // Remove all
       await redis.del(`assign:${school}:${userType}`);
       return res.json({
         response_type: 'in_channel',
-        text: `✅ Cleared assignment for ${school} + ${userType}`,
+        text: `✅ Cleared all assignments for ${school} + ${userType}`,
       });
     }
 
-    // Create an assignment: /assign <school> <intent> @user
+    // Create an assignment: /assign <school> <intent> @user @user2 ...
     const school = parts[0]?.toLowerCase();
     const userType = parts[1]?.toLowerCase();
 
@@ -339,64 +361,28 @@ app.post('/slack/assign', async (req, res) => {
       });
     }
 
-    // Extract user ID from mention
-    let userId;
+    // Extract all user IDs from mentions
+    const userIds = await resolveUsers(text);
 
-    // Try formatted mention first: <@U123456> or <@U123456|display name>
-    const formattedMatch = text.match(/<@([A-Z0-9]+)(\|[^>]+)?>/i);
-    if (formattedMatch) {
-      userId = formattedMatch[1];
-    } else {
-      // Try plain @username format
-      const plainMatch = text.match(/@(\S+)/);
-      if (!plainMatch) {
-        return res.json({
-          response_type: 'ephemeral',
-          text: '❌ Please mention a user with @username\nExample: `/assign academy registration @john`',
-        });
-      }
-
-      // Look up user by username via Slack API
-      const username = plainMatch[1];
-      try {
-        const lookupResponse = await axios.get(
-          `https://slack.com/api/users.list`,
-          { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` } }
-        );
-
-        if (!lookupResponse.data.ok) {
-          throw new Error(lookupResponse.data.error);
-        }
-
-        const user = lookupResponse.data.members.find(
-          m => m.name === username ||
-               m.profile?.display_name?.toLowerCase() === username.toLowerCase() ||
-               m.real_name?.toLowerCase() === username.toLowerCase()
-        );
-
-        if (!user) {
-          return res.json({
-            response_type: 'ephemeral',
-            text: `❌ User "${username}" not found. Make sure to use their Slack username.`,
-          });
-        }
-
-        userId = user.id;
-      } catch (err) {
-        return res.json({
-          response_type: 'ephemeral',
-          text: `❌ Error looking up user: ${err.message}`,
-        });
-      }
+    if (userIds.length === 0) {
+      return res.json({
+        response_type: 'ephemeral',
+        text: '❌ Please mention at least one user with @username\nExample: `/assign academy registration @john @jane`',
+      });
     }
-    await redis.set(`assign:${school}:${userType}`, userId);
+
+    // Add all users to the assignment set
+    for (const uid of userIds) {
+      await redis.sAdd(`assign:${school}:${userType}`, uid);
+    }
 
     const schoolLabel = STRINGS.schoolTypes[school] || school;
-    const userTypeLabel = STRINGS.intentTypes[userType] || userType;
+    const intentLabel = STRINGS.intentTypes[userType] || userType;
+    const mentions = userIds.map(id => `<@${id}>`).join(', ');
 
     return res.json({
       response_type: 'in_channel',
-      text: `✅ Assigned <@${userId}> to handle ${schoolLabel} + ${userTypeLabel} tickets`,
+      text: `✅ Assigned ${mentions} to handle ${schoolLabel} + ${intentLabel} tickets`,
     });
 
   } catch (error) {
@@ -650,39 +636,81 @@ async function getAllAssignments() {
   const assignments = {};
 
   for (const key of keys) {
-    const userId = await redis.get(key);
-    const shortKey = key.replace('assign:', '');
-    assignments[shortKey] = userId;
+    const userIds = await redis.sMembers(key);
+    if (userIds.length > 0) {
+      const shortKey = key.replace('assign:', '');
+      assignments[shortKey] = userIds;
+    }
   }
 
   return assignments;
 }
 
 /**
- * Get assignee for a school/userType combination
+ * Get assignees for a school/intent combination
+ * Returns an array of user IDs
  */
-async function getAssignee(school, userType) {
-  if (!school && !userType) return null;
+async function getAssignees(school, intent) {
+  if (!school && !intent) return [];
 
   // Try exact match first
-  if (school && userType) {
-    const exact = await redis.get(`assign:${school}:${userType}`);
-    if (exact) return exact;
+  if (school && intent) {
+    const exact = await redis.sMembers(`assign:${school}:${intent}`);
+    if (exact.length > 0) return exact;
   }
 
-  // Try school-only match
-  if (school) {
-    const schoolOnly = await redis.get(`assign:${school}:*`);
-    if (schoolOnly) return schoolOnly;
+  return [];
+}
+
+/**
+ * Resolve @mentions and plain @usernames to Slack user IDs
+ */
+async function resolveUsers(text) {
+  const userIds = [];
+
+  // Find all formatted mentions: <@U123456> or <@U123456|display name>
+  const formattedMatches = text.matchAll(/<@([A-Z0-9]+)(\|[^>]+)?>/gi);
+  for (const match of formattedMatches) {
+    userIds.push(match[1]);
   }
 
-  // Try userType-only match
-  if (userType) {
-    const userTypeOnly = await redis.get(`assign:*:${userType}`);
-    if (userTypeOnly) return userTypeOnly;
+  if (userIds.length > 0) return userIds;
+
+  // Fall back to plain @username mentions
+  const plainMatches = text.matchAll(/@(\S+)/g);
+  const usernames = [];
+  for (const match of plainMatches) {
+    usernames.push(match[1]);
   }
 
-  return null;
+  if (usernames.length === 0) return [];
+
+  // Look up users via Slack API
+  try {
+    const lookupResponse = await axios.get(
+      `https://slack.com/api/users.list`,
+      { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` } }
+    );
+
+    if (!lookupResponse.data.ok) {
+      throw new Error(lookupResponse.data.error);
+    }
+
+    for (const username of usernames) {
+      const user = lookupResponse.data.members.find(
+        m => m.name === username ||
+             m.profile?.display_name?.toLowerCase() === username.toLowerCase() ||
+             m.real_name?.toLowerCase() === username.toLowerCase()
+      );
+      if (user) {
+        userIds.push(user.id);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error looking up users:', err.message);
+  }
+
+  return userIds;
 }
 
 // ============================================
