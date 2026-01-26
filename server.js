@@ -13,7 +13,7 @@
  * 3. New conversation appears in Slack channel as a thread
  * 4. Agent replies in thread → message automatically sent to WhatsApp user
  * 5. User responses → forwarded to Slack thread via /inbound
- * 6. Agent reacts with ✅ → conversation ends
+ * 6. Agent clicks "Close Ticket" button → conversation ends
  */
 
 require('dotenv').config();
@@ -56,7 +56,11 @@ const AI_STUDIO_BASE_URL = `https://studio-api-${AI_STUDIO_REGION}.ai.vonage.com
 const STRINGS = {
   // New ticket message
   newRequest: '🆕 *New WhatsApp Support Request*',
-  reactToClose: '✅ React with :white_check_mark: to close',
+  closeButton: '✅ Close Ticket',
+  closeConfirmTitle: 'Close Ticket',
+  closeConfirmText: 'Are you sure you want to close this ticket?',
+  closeConfirmYes: 'Yes, close it',
+  closeConfirmNo: 'Cancel',
   replyInThread: '💬 Reply in this thread to respond',
   transcriptionHeader: 'Transcription:',
   noMessages: '_No previous messages_',
@@ -147,9 +151,33 @@ app.post('/start', async (req, res) => {
       messageText += `\n${STRINGS.assignedTo} ${mentions}\n`;
     }
     if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
-    messageText += `\n${STRINGS.reactToClose}`;
     if (transcription) messageText += `\n\n${STRINGS.transcriptionHeader}${transcription}`;
     messageText += `\n${STRINGS.replyInThread}`;
+
+    // Build blocks with a Close Ticket button
+    const blocks = [
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: messageText },
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: STRINGS.closeButton },
+            style: 'danger',
+            action_id: 'close_ticket',
+            confirm: {
+              title: { type: 'plain_text', text: STRINGS.closeConfirmTitle },
+              text: { type: 'mrkdwn', text: STRINGS.closeConfirmText },
+              confirm: { type: 'plain_text', text: STRINGS.closeConfirmYes },
+              deny: { type: 'plain_text', text: STRINGS.closeConfirmNo },
+            },
+          },
+        ],
+      },
+    ];
 
     // Use Slack API to get the message timestamp for threading
     const response = await axios.post(
@@ -157,6 +185,7 @@ app.post('/start', async (req, res) => {
       {
         channel: SLACK_CHANNEL_ID,
         text: messageText,
+        blocks: blocks,
       },
       {
         headers: {
@@ -399,7 +428,6 @@ app.post('/slack/assign', async (req, res) => {
  *
  * Handles:
  * - Thread messages → automatically forwarded to WhatsApp
- * - ✅ reactions → closes the ticket
  */
 app.post('/slack/events', async (req, res) => {
   try {
@@ -415,12 +443,6 @@ app.post('/slack/events', async (req, res) => {
     const event = req.body.event;
     if (!event) return;
 
-    // Handle reaction added (for closing tickets)
-    if (event.type === 'reaction_added') {
-      await handleReaction(event);
-      return;
-    }
-
     // Handle message events (for auto-reply)
     if (event.type === 'message') {
       await handleMessage(event);
@@ -429,6 +451,83 @@ app.post('/slack/events', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error in /slack/events:', error.message);
+  }
+});
+
+/**
+ * /slack/interactions - Slack Interactive Components handler
+ *
+ * Handles button clicks (e.g. Close Ticket button)
+ */
+app.post('/slack/interactions', async (req, res) => {
+  try {
+    const payload = JSON.parse(req.body.payload);
+
+    // Acknowledge immediately
+    res.status(200).send('');
+
+    if (payload.type !== 'block_actions') return;
+
+    const action = payload.actions?.[0];
+    if (!action || action.action_id !== 'close_ticket') return;
+
+    const messageTs = payload.message.ts;
+    const channelId = payload.channel.id;
+
+    // Find session by thread (the message ts is the thread parent)
+    const session = await getSessionByThread(messageTs);
+    if (!session) {
+      console.warn('⚠️ No session found for thread:', messageTs);
+      return;
+    }
+
+    console.log(`🔒 Closing ticket for session ${session.session_id}`);
+
+    // Tell AI Studio to end the conversation
+    await axios.post(
+      `${AI_STUDIO_BASE_URL}/live-agent/disconnect/${session.session_id}`,
+      {},
+      { headers: { 'X-Vgai-Key': AI_STUDIO_KEY } }
+    );
+
+    // Post closure message in thread
+    await axios.post(SLACK_WEBHOOK_URL, {
+      thread_ts: messageTs,
+      text: STRINGS.ticketClosed,
+    });
+
+    // Update the original message to remove the button
+    await axios.post(
+      'https://slack.com/api/chat.update',
+      {
+        channel: channelId,
+        ts: messageTs,
+        text: payload.message.text,
+        blocks: [
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: payload.message.text },
+          },
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: STRINGS.ticketClosed },
+          },
+        ],
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Clean up session from Redis
+    await deleteSession(session.session_id, messageTs);
+    console.log(`✅ Session ${session.session_id} closed`);
+
+  } catch (error) {
+    console.error('❌ Error in /slack/interactions:', error.message);
   }
 });
 
@@ -544,44 +643,6 @@ async function handleFileUpload(file, session, threadTs, caption) {
       text: STRINGS.failedToSendFile.replace('{error}', error.message),
     });
   }
-}
-
-/**
- * Handle reaction events - close ticket on ✅
- */
-async function handleReaction(event) {
-  // Only handle white_check_mark emoji
-  if (event.reaction !== 'white_check_mark') {
-    return;
-  }
-
-  // The reaction must be on the parent message (thread starter)
-  const threadTs = event.item.ts;
-
-  // Find session by thread
-  const session = await getSessionByThread(threadTs);
-  if (!session) {
-    return;
-  }
-
-  console.log(`🔒 Closing ticket for session ${session.session_id}`);
-
-  // Tell AI Studio to end the conversation
-  await axios.post(
-    `${AI_STUDIO_BASE_URL}/live-agent/disconnect/${session.session_id}`,
-    {},
-    { headers: { 'X-Vgai-Key': AI_STUDIO_KEY } }
-  );
-
-  // Post closure message in thread
-  await axios.post(SLACK_WEBHOOK_URL, {
-    thread_ts: threadTs,
-    text: STRINGS.ticketClosed,
-  });
-
-  // Clean up session from Redis
-  await deleteSession(session.session_id, threadTs);
-  console.log(`✅ Session ${session.session_id} closed`);
 }
 
 // ============================================
@@ -777,6 +838,7 @@ async function startServer() {
 ║  • POST /start         - AI Studio live agent start       ║
 ║  • POST /inbound       - AI Studio inbound messages       ║
 ║  • POST /slack/events  - Slack Events API                 ║
+║  • POST /slack/interactions - Slack interactive buttons   ║
 ║  • POST /slack/assign  - Assignment slash command         ║
 ║  • GET  /health        - Health check                     ║
 ╚═══════════════════════════════════════════════════════════╝
