@@ -61,11 +61,11 @@ const STRINGS = {
   transcriptionHeader: 'Transcription:',
   noMessages: '_No previous messages_',
 
-  // User types (incumbency)
-  userTypes: {
-    'new_student': '🆕 New Student',
-    'current_student': '📚 Current Student',
-    'prospective': '👀 Prospective',
+  // Intent types
+  intentTypes: {
+    'registration': '📝 Registration',
+    'payment': '💳 Payment',
+    'inquiry': '❓ Inquiry',
   },
 
   // School types
@@ -124,24 +124,24 @@ app.post('/start', async (req, res) => {
     const profileName = params.PROFILE_NAME || 'Unknown';
     const phoneNumber = params.SENDER_PHONE_NUMBER || '';
     const initialMessage = params.INITIAL_MESSAGE || '';
-    const incumbency = params['USER.incumbency'] || '';
+    const intent = params['USER.intent'] || '';
     const school = params['USER.school'] || '';
 
-    // Format user type and school
-    const userType = STRINGS.userTypes[incumbency] || incumbency;
+    // Format intent and school
+    const intentType = STRINGS.intentTypes[intent] || intent;
     const schoolType = STRINGS.schoolTypes[school] || school;
 
     // Look up assigned user
-    const assigneeId = await getAssignee(school, incumbency);
+    const assigneeId = await getAssignee(school, intent);
 
     let messageText = `${STRINGS.newRequest}\n\n`;
     messageText += `👤 *${profileName}*`;
     if (phoneNumber) messageText += ` (${phoneNumber})`;
     messageText += `\n`;
-    if (userType) messageText += `${userType}`;
-    if (userType && schoolType) messageText += ` • `;
+    if (intentType) messageText += `${intentType}`;
+    if (intentType && schoolType) messageText += ` • `;
     if (schoolType) messageText += `${schoolType}`;
-    if (userType || schoolType) messageText += `\n`;
+    if (intentType || schoolType) messageText += `\n`;
     if (assigneeId) messageText += `\n${STRINGS.assignedTo} <@${assigneeId}>\n`;
     if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
     messageText += `\n${STRINGS.reactToClose}`;
@@ -260,10 +260,10 @@ app.post('/inbound', async (req, res) => {
  * /slack/assign - Slash command to assign users to ticket types
  *
  * Usage:
- *   /assign academy new_student @user - Assign user to academy new students
- *   /assign daycare current_student @user - Assign user to daycare current students
+ *   /assign academy registration @user - Assign user to academy registrations
+ *   /assign daycare payment @user - Assign user to daycare payments
  *   /assign list - Show all assignments
- *   /assign clear academy new_student - Remove an assignment
+ *   /assign clear academy registration - Remove an assignment
  */
 app.post('/slack/assign', async (req, res) => {
   try {
@@ -277,15 +277,15 @@ app.post('/slack/assign', async (req, res) => {
         response_type: 'ephemeral',
         text: `📖 */assign* - Manage ticket assignments\n\n` +
           `*Commands:*\n` +
-          `• \`/assign <school> <user_type> @user\` - Assign a user\n` +
+          `• \`/assign <school> <intent> @user\` - Assign a user\n` +
           `• \`/assign list\` - Show all assignments\n` +
-          `• \`/assign clear <school> <user_type>\` - Remove assignment\n` +
+          `• \`/assign clear <school> <intent>\` - Remove assignment\n` +
           `• \`/assign help\` - Show this help\n\n` +
           `*Schools:* \`academy\`, \`daycare\`\n` +
-          `*User types:* \`new_student\`, \`current_student\`, \`prospective\`\n\n` +
+          `*Intents:* \`registration\`, \`payment\`, \`inquiry\`\n\n` +
           `*Examples:*\n` +
-          `• \`/assign academy new_student @john\`\n` +
-          `• \`/assign daycare current_student @jane\``,
+          `• \`/assign academy registration @john\`\n` +
+          `• \`/assign daycare payment @jane\``,
       });
     }
 
@@ -295,16 +295,16 @@ app.post('/slack/assign', async (req, res) => {
       if (Object.keys(assignments).length === 0) {
         return res.json({
           response_type: 'ephemeral',
-          text: '📋 *No assignments configured*\n\nUse `/assign <school> <user_type> @user` to create one.',
+          text: '📋 *No assignments configured*\n\nUse `/assign <school> <intent> @user` to create one.',
         });
       }
 
       let response = '📋 *Current Assignments:*\n\n';
       for (const [key, userId] of Object.entries(assignments)) {
-        const [school, userType] = key.split(':');
+        const [school, intent] = key.split(':');
         const schoolLabel = STRINGS.schoolTypes[school] || school;
-        const userTypeLabel = STRINGS.userTypes[userType] || userType;
-        response += `• ${schoolLabel} + ${userTypeLabel} → <@${userId}>\n`;
+        const intentLabel = STRINGS.intentTypes[intent] || intent;
+        response += `• ${schoolLabel} + ${intentLabel} → <@${userId}>\n`;
       }
       return res.json({ response_type: 'ephemeral', text: response });
     }
@@ -317,7 +317,7 @@ app.post('/slack/assign', async (req, res) => {
       if (!school || !userType) {
         return res.json({
           response_type: 'ephemeral',
-          text: '❌ Usage: `/assign clear <school> <user_type>`\nExample: `/assign clear academy new_student`\n\nType `/assign help` for more info.',
+          text: '❌ Usage: `/assign clear <school> <intent>`\nExample: `/assign clear academy registration`\n\nType `/assign help` for more info.',
         });
       }
 
@@ -328,14 +328,14 @@ app.post('/slack/assign', async (req, res) => {
       });
     }
 
-    // Create an assignment: /assign <school> <user_type> @user
+    // Create an assignment: /assign <school> <intent> @user
     const school = parts[0]?.toLowerCase();
     const userType = parts[1]?.toLowerCase();
 
     if (!school || !userType) {
       return res.json({
         response_type: 'ephemeral',
-        text: '❌ Usage: `/assign <school> <user_type> @user`\nExample: `/assign academy new_student @john`\n\nType `/assign help` for more info.',
+        text: '❌ Usage: `/assign <school> <intent> @user`\nExample: `/assign academy registration @john`\n\nType `/assign help` for more info.',
       });
     }
 
@@ -352,7 +352,7 @@ app.post('/slack/assign', async (req, res) => {
       if (!plainMatch) {
         return res.json({
           response_type: 'ephemeral',
-          text: '❌ Please mention a user with @username\nExample: `/assign academy new_student @john`',
+          text: '❌ Please mention a user with @username\nExample: `/assign academy registration @john`',
         });
       }
 
