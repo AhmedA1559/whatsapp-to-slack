@@ -50,6 +50,9 @@ const AI_STUDIO_REGION = process.env.AI_STUDIO_REGION || 'eu';
 // AI Studio API base URL based on region
 const AI_STUDIO_BASE_URL = `https://studio-api-${AI_STUDIO_REGION}.ai.vonage.com`;
 
+// In-memory map of pending auto-response timers per session
+const pendingTimers = new Map();
+
 // ============================================
 // Translatable Strings
 // ============================================
@@ -97,7 +100,12 @@ const STRINGS = {
   botRole: '🤖 Bot',
   userRole: '👤 User',
 
-  assignedTo: '👋 Assigned to'
+  assignedTo: '👋 Assigned to',
+
+  // Auto-response messages sent to customer when no agent has replied
+  busyMessage3Min: 'Thank you for your patience. Our team is currently busy and will be with you shortly.',
+  busyMessage10Min: 'We apologize for the delay. Our team is experiencing high volume but we haven\'t forgotten about you. Someone will be with you as soon as possible.',
+  busyNotice: '⏱️ _Auto-message sent to customer:_ "{message}"',
 };
 
 // Middleware
@@ -202,6 +210,10 @@ app.post('/start', async (req, res) => {
     // Auto-create session with the thread timestamp
     const threadTs = response.data.ts;
     await saveSession(sessionId, threadTs);
+
+    // Schedule auto-response messages in case no agent replies
+    scheduleAutoResponses(sessionId);
+
     console.log(`✅ Conversation initiated in Slack, session ${sessionId} linked to thread ${threadTs}`);
 
     res.status(200).json({ status: 'success', message: 'Conversation started in Slack' });
@@ -553,6 +565,9 @@ async function handleMessage(event) {
     return;
   }
 
+  // Agent has replied — cancel any pending auto-response timers
+  cancelAutoResponses(session.session_id);
+
   // Handle file uploads
   if (event.files && event.files.length > 0) {
     for (const file of event.files) {
@@ -775,6 +790,60 @@ async function resolveUsers(text) {
 }
 
 // ============================================
+// Auto-Response Timers
+// ============================================
+
+/**
+ * Schedule auto-response messages for when no agent has replied yet.
+ * Sends a "busy" message to the customer at 3 minutes and 10 minutes.
+ */
+function scheduleAutoResponses(sessionId) {
+  const threeMin = setTimeout(() => sendBusyMessage(sessionId, STRINGS.busyMessage3Min), 3 * 60 * 1000);
+  const tenMin = setTimeout(() => sendBusyMessage(sessionId, STRINGS.busyMessage10Min), 10 * 60 * 1000);
+  pendingTimers.set(sessionId, { threeMin, tenMin });
+}
+
+/**
+ * Cancel pending auto-response timers for a session.
+ */
+function cancelAutoResponses(sessionId) {
+  const timers = pendingTimers.get(sessionId);
+  if (timers) {
+    clearTimeout(timers.threeMin);
+    clearTimeout(timers.tenMin);
+    pendingTimers.delete(sessionId);
+    console.log(`⏱️ Auto-response timers cancelled for session ${sessionId}`);
+  }
+}
+
+/**
+ * Send a busy/delay message to the WhatsApp customer and notify the Slack thread.
+ */
+async function sendBusyMessage(sessionId, message) {
+  try {
+    const session = await getSession(sessionId);
+    if (!session) return;
+
+    // Send to WhatsApp customer
+    await axios.post(
+      `${AI_STUDIO_BASE_URL}/live-agent/outbound/${session.session_id}`,
+      { message_type: 'text', text: message },
+      { headers: { 'X-Vgai-Key': AI_STUDIO_KEY } }
+    );
+
+    // Notify in Slack thread
+    await axios.post(SLACK_WEBHOOK_URL, {
+      thread_ts: session.thread_ts,
+      text: STRINGS.busyNotice.replace('{message}', message),
+    });
+
+    console.log(`⏱️ Auto-response sent for session ${sessionId}: "${message}"`);
+  } catch (error) {
+    console.error(`❌ Error sending auto-response for session ${sessionId}:`, error.message);
+  }
+}
+
+// ============================================
 // Redis Session Management
 // ============================================
 
@@ -817,6 +886,7 @@ async function getSessionByThread(threadTs) {
  * Delete session from Redis
  */
 async function deleteSession(sessionId, threadTs) {
+  cancelAutoResponses(sessionId);
   await redis.del(`session:${sessionId}`);
   await redis.del(`thread:${threadTs}`);
 }
