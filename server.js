@@ -21,6 +21,7 @@ const express = require('express');
 const axios = require('axios');
 const cloudinary = require('cloudinary').v2;
 const { createClient } = require('redis');
+const { parsePhoneNumberFromString } = require('libphonenumber-js');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -141,7 +142,7 @@ app.post('/start', async (req, res) => {
 
     let messageText = `${STRINGS.newRequest}\n\n`;
     messageText += `👤 *${profileName}*`;
-    if (phoneNumber) messageText += ` (${phoneNumber})`;
+    if (phoneNumber) messageText += ` - ${formatPhoneNumber(phoneNumber)}`;
     messageText += `\n`;
     if (intentType) messageText += `${intentType}`;
     if (intentType && schoolType) messageText += ` • `;
@@ -200,7 +201,7 @@ app.post('/start', async (req, res) => {
 
     // Auto-create session with the thread timestamp
     const threadTs = response.data.ts;
-    await saveSession(sessionId, threadTs);
+    await saveSession(sessionId, threadTs, profileName);
 
     // Schedule auto-response messages in case no agent replies
     scheduleAutoResponses(sessionId);
@@ -234,13 +235,21 @@ app.post('/inbound', async (req, res) => {
       return;
     }
 
+    // Use customer's name as the webhook sender
+    const customerName = session.profile_name || 'Customer';
+    const baseMessage = {
+      thread_ts: session.thread_ts,
+      username: customerName,
+      icon_emoji: ':bust_in_silhouette:',
+    };
+
     let slackMessage;
 
     switch (messageType) {
       case 'image': {
         const imageCaption = req.body.image.caption ? `\n"${req.body.image.caption}"` : '';
         slackMessage = {
-          thread_ts: session.thread_ts,
+          ...baseMessage,
           text: `${STRINGS.customerImage}${imageCaption}`,
           blocks: [
             {
@@ -260,7 +269,7 @@ app.post('/inbound', async (req, res) => {
       case 'video': {
         const videoCaption = req.body.video.caption ? `\n"${req.body.video.caption}"` : '';
         slackMessage = {
-          thread_ts: session.thread_ts,
+          ...baseMessage,
           text: `${STRINGS.customerVideo}${videoCaption}\n${req.body.video.url}`
         };
         break;
@@ -268,7 +277,7 @@ app.post('/inbound', async (req, res) => {
 
       case 'audio': {
         slackMessage = {
-          thread_ts: session.thread_ts,
+          ...baseMessage,
           text: `${STRINGS.customerAudio}\n🎵 ${req.body.audio.url}`
         };
         break;
@@ -276,8 +285,8 @@ app.post('/inbound', async (req, res) => {
 
       default: // text
         slackMessage = {
-          thread_ts: session.thread_ts,
-          text: `${STRINGS.customerText}\n${req.body.text}`
+          ...baseMessage,
+          text: req.body.text
         };
     }
 
@@ -657,6 +666,16 @@ async function handleFileUpload(file, session, threadTs, caption) {
 // ============================================
 
 /**
+ * Format a phone number for display using libphonenumber-js
+ */
+function formatPhoneNumber(number) {
+  if (!number) return '';
+  const phone = parsePhoneNumberFromString('+' + number.replace(/\D/g, ''));
+  if (phone) return phone.formatInternational();
+  return number;
+}
+
+/**
  * Extract parameters from AI Studio history into a key-value object
  */
 function extractParameters(parameters = []) {
@@ -821,10 +840,11 @@ async function sendBusyMessage(sessionId, message) {
 /**
  * Save a new session to Redis
  */
-async function saveSession(sessionId, threadTs) {
+async function saveSession(sessionId, threadTs, profileName) {
   const session = {
     session_id: sessionId,
     thread_ts: threadTs,
+    profile_name: profileName || 'Customer',
     created_at: new Date().toISOString(),
   };
 
