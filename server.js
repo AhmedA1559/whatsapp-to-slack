@@ -499,17 +499,18 @@ app.post('/slack/interactions', async (req, res) => {
       text: STRINGS.ticketClosed,
     });
 
-    // Update the original message to remove the button
+    // Update the original message to remove the buttons
+    const originalText = payload.message.blocks?.[0]?.text?.text || payload.message.text;
     await axios.post(
       'https://slack.com/api/chat.update',
       {
         channel: channelId,
         ts: messageTs,
-        text: payload.message.text,
+        text: originalText,
         blocks: [
           {
             type: 'section',
-            text: { type: 'mrkdwn', text: payload.message.text },
+            text: { type: 'mrkdwn', text: originalText },
           },
           {
             type: 'section',
