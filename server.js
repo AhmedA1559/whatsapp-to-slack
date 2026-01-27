@@ -65,7 +65,6 @@ const STRINGS = {
   closeConfirmYes: 'Yes, close it',
   closeConfirmNo: 'Cancel',
   replyInThread: '💬 Reply in this thread to respond',
-  transcriptionHeader: 'Transcription:',
   noMessages: '_No previous messages_',
 
   // Intent types
@@ -96,10 +95,6 @@ const STRINGS = {
   failedToSendFile: '❌ Failed to send file to WhatsApp: {error}',
   sessionNotFound: 'Session not found',
 
-  // Transcription roles
-  botRole: '🤖 Bot',
-  userRole: '👤 User',
-
   assignedTo: '👋 Assigned to',
 
   // Auto-response messages sent to customer when no agent has replied
@@ -129,13 +124,11 @@ app.post('/start', async (req, res) => {
     console.log('📥 Start endpoint received:', JSON.stringify(req.body, null, 2));
 
     const sessionId = req.body.sessionId;
-    const transcription = handleTranscription(req.body.history?.transcription);
 
     // Extract parameters from history
     const params = extractParameters(req.body.history?.parameters);
     const profileName = params.PROFILE_NAME || 'Unknown';
     const phoneNumber = params.SENDER_PHONE_NUMBER || '';
-    const initialMessage = params.INITIAL_MESSAGE || '';
     const intent = params['USER.intent'] || '';
     const school = params['USER.school'] || '';
 
@@ -158,8 +151,6 @@ app.post('/start', async (req, res) => {
       const mentions = assigneeIds.map(id => `<@${id}>`).join(', ');
       messageText += `\n${STRINGS.assignedTo} ${mentions}\n`;
     }
-    if (initialMessage) messageText += `💬 "${initialMessage}"\n`;
-    if (transcription) messageText += `\n\n${STRINGS.transcriptionHeader}${transcription}`;
     messageText += `\n${STRINGS.replyInThread}`;
 
     // Build blocks with a Close Ticket button
@@ -677,27 +668,6 @@ function extractParameters(parameters = []) {
     }
   }
   return result;
-}
-
-/**
- * Format transcription history for Slack display
- */
-function handleTranscription(transcription = []) {
-  if (!transcription || !transcription.length) return null;
-
-  let formatted = '\n```';
-
-  for (const message of transcription) {
-    for (const key in message) {
-      const keyUpper = key.toUpperCase();
-      const isBot = keyUpper === 'BOT' || keyUpper === 'AGENT' || keyUpper === 'ASSISTANT';
-      const role = isBot ? STRINGS.botRole : STRINGS.userRole;
-      formatted += `\n${role}: ${message[key]}`;
-    }
-  }
-
-  formatted += '\n```';
-  return formatted;
 }
 
 // ============================================
