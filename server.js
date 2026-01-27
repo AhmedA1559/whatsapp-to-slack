@@ -235,9 +235,10 @@ app.post('/inbound', async (req, res) => {
       return;
     }
 
-    // Use customer's name as the webhook sender
+    // Use customer's name as the message sender
     const customerName = session.profile_name || 'Customer';
     const baseMessage = {
+      channel: SLACK_CHANNEL_ID,
       thread_ts: session.thread_ts,
       username: customerName,
       icon_emoji: ':bust_in_silhouette:',
@@ -290,7 +291,16 @@ app.post('/inbound', async (req, res) => {
         };
     }
 
-    await axios.post(SLACK_WEBHOOK_URL, slackMessage);
+    await axios.post(
+      'https://slack.com/api/chat.postMessage',
+      slackMessage,
+      {
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
     console.log(`✅ ${messageType} message forwarded to Slack thread`);
 
     res.status(200).json({ status: 'success' });
