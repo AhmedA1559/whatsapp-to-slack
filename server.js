@@ -142,7 +142,7 @@ app.post('/start', async (req, res) => {
 
     let messageText = `${STRINGS.newRequest}\n\n`;
     messageText += `👤 *${profileName}*`;
-    if (phoneNumber) messageText += ` - ${formatPhoneNumber(phoneNumber)}`;
+    if (phoneNumber) messageText += ` • ${formatPhoneNumber(phoneNumber)}`;
     messageText += `\n`;
     if (intentType) messageText += `${intentType}`;
     if (intentType && schoolType) messageText += ` • `;
