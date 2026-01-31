@@ -1098,7 +1098,7 @@ async function handleBroadcastMessage(event) {
       { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
     );
 
-    console.log(JSON.stringify(resp));
+    console.log(JSON.stringify(resp.data));
   } catch (error) {
     console.error('❌ Error handling broadcast message:', error.message);
   }
