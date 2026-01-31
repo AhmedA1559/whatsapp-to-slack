@@ -97,6 +97,10 @@ const STRINGS = {
   sessionNotFound: 'Session not found',
 
   assignedTo: '👋 Assigned to',
+  saveContactButton: '📇 Save Contact',
+  saveContactModalTitle: 'Save Contact',
+  saveContactNameLabel: 'Contact Name',
+  saveContactSaved: '📇 Contact saved as *{name}*',
 
   // Auto-response messages sent to customer when no agent has replied
   busyMessage3Min: 'Thank you for your patience. Our team is currently busy and will be with you shortly.',
@@ -128,10 +132,18 @@ app.post('/start', async (req, res) => {
 
     // Extract parameters from history
     const params = extractParameters(req.body.history?.parameters);
-    const profileName = params.PROFILE_NAME || 'Unknown';
     const phoneNumber = params.SENDER_PHONE_NUMBER || '';
     const intent = params['USER.intent'] || '';
     const school = params['USER.school'] || '';
+
+    // Use saved contact name if available, otherwise WhatsApp profile name
+    let profileName = params.PROFILE_NAME || 'Unknown';
+    if (phoneNumber) {
+      const savedContact = await redis.get(`contact:${phoneNumber}`);
+      if (savedContact) {
+        profileName = JSON.parse(savedContact).name;
+      }
+    }
 
     // Format intent and school
     const intentType = STRINGS.intentTypes[intent] || intent;
@@ -154,7 +166,31 @@ app.post('/start', async (req, res) => {
     }
     messageText += `\n${STRINGS.replyInThread}`;
 
-    // Build blocks with a Close Ticket button
+    // Build blocks with action buttons
+    const actionElements = [
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: STRINGS.closeButton },
+        style: 'danger',
+        action_id: 'close_ticket',
+        confirm: {
+          title: { type: 'plain_text', text: STRINGS.closeConfirmTitle },
+          text: { type: 'mrkdwn', text: STRINGS.closeConfirmText },
+          confirm: { type: 'plain_text', text: STRINGS.closeConfirmYes },
+          deny: { type: 'plain_text', text: STRINGS.closeConfirmNo },
+        },
+      },
+    ];
+
+    if (phoneNumber) {
+      actionElements.push({
+        type: 'button',
+        text: { type: 'plain_text', text: STRINGS.saveContactButton },
+        action_id: 'save_contact',
+        value: JSON.stringify({ phone: phoneNumber, name: profileName }),
+      });
+    }
+
     const blocks = [
       {
         type: 'section',
@@ -162,20 +198,7 @@ app.post('/start', async (req, res) => {
       },
       {
         type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: STRINGS.closeButton },
-            style: 'danger',
-            action_id: 'close_ticket',
-            confirm: {
-              title: { type: 'plain_text', text: STRINGS.closeConfirmTitle },
-              text: { type: 'mrkdwn', text: STRINGS.closeConfirmText },
-              confirm: { type: 'plain_text', text: STRINGS.closeConfirmYes },
-              deny: { type: 'plain_text', text: STRINGS.closeConfirmNo },
-            },
-          },
-        ],
+        elements: actionElements,
       },
     ];
 
@@ -485,13 +508,94 @@ app.post('/slack/interactions', async (req, res) => {
   try {
     const payload = JSON.parse(req.body.payload);
 
+    // Handle modal submission
+    if (payload.type === 'view_submission') {
+      const callbackId = payload.view.callback_id;
+      if (callbackId === 'save_contact_modal') {
+        const name = payload.view.state.values.contact_name_block.contact_name_input.value;
+        const meta = JSON.parse(payload.view.private_metadata);
+        const phone = meta.phone;
+
+        // Save contact to Redis
+        await redis.set(`contact:${phone}`, JSON.stringify({ name, phone, saved_at: new Date().toISOString() }));
+
+        // Post confirmation in the thread
+        if (meta.thread_ts) {
+          await axios.post(
+            'https://slack.com/api/chat.postMessage',
+            {
+              channel: SLACK_CHANNEL_ID,
+              thread_ts: meta.thread_ts,
+              text: STRINGS.saveContactSaved.replace('{name}', name),
+            },
+            {
+              headers: {
+                'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+        }
+
+        console.log(`📇 Contact saved: ${name} (${phone})`);
+        return res.status(200).json({ response_action: 'clear' });
+      }
+      return res.status(200).send('');
+    }
+
     // Acknowledge immediately
     res.status(200).send('');
 
     if (payload.type !== 'block_actions') return;
 
     const action = payload.actions?.[0];
-    if (!action || action.action_id !== 'close_ticket') return;
+    if (!action) return;
+
+    // Handle "Save Contact" — open a modal
+    if (action.action_id === 'save_contact') {
+      const data = JSON.parse(action.value);
+      const messageTs = payload.message.ts;
+
+      // Check if contact already exists
+      const existing = await redis.get(`contact:${data.phone}`);
+      const defaultName = existing ? JSON.parse(existing).name : data.name;
+
+      await axios.post(
+        'https://slack.com/api/views.open',
+        {
+          trigger_id: payload.trigger_id,
+          view: {
+            type: 'modal',
+            callback_id: 'save_contact_modal',
+            private_metadata: JSON.stringify({ phone: data.phone, thread_ts: messageTs }),
+            title: { type: 'plain_text', text: STRINGS.saveContactModalTitle },
+            submit: { type: 'plain_text', text: 'Save' },
+            close: { type: 'plain_text', text: 'Cancel' },
+            blocks: [
+              {
+                type: 'input',
+                block_id: 'contact_name_block',
+                label: { type: 'plain_text', text: STRINGS.saveContactNameLabel },
+                element: {
+                  type: 'plain_text_input',
+                  action_id: 'contact_name_input',
+                  initial_value: defaultName,
+                },
+              },
+            ],
+          },
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      return;
+    }
+
+    if (action.action_id !== 'close_ticket') return;
 
     const messageTs = payload.message.ts;
     const channelId = payload.channel.id;
