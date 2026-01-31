@@ -132,14 +132,14 @@ app.get('/contact/check', async (req, res) => {
     const phone = req.query.phone;
     console.log(`🔍 Checking contact for phone number: ${phone}`);
     if (!phone) {
-      return res.send('false');
+      return res.json({ is_saved: false });
     }
 
     const contactData = await redis.get(`contact:${phone}`);
-    res.send(contactData ? 'true' : 'false');
+    res.json({ is_saved: !!contactData });
   } catch (error) {
     console.error('❌ Error checking contact:', error.message);
-    res.send('false');
+    res.json({ is_saved: false });
   }
 });
 
