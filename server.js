@@ -548,6 +548,8 @@ app.post('/slack/events', async (req, res) => {
     const event = req.body.event;
     if (!event) return;
 
+    console.log(`📨 [Event] type=${event.type} channel=${event.channel} subtype=${event.subtype || 'none'} bot_id=${event.bot_id || 'none'} thread_ts=${event.thread_ts || 'none'}`);
+
     // Handle App Home tab opened
     if (event.type === 'app_home_opened' && event.tab === 'home') {
       await publishHomeTab(event.user);
