@@ -1056,6 +1056,7 @@ async function handleBroadcastMessage(event) {
         },
         { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
       );
+      console.log('⚠️ No roles defined for broadcast');
       return;
     }
 
@@ -1064,7 +1065,7 @@ async function handleBroadcastMessage(event) {
       value: r,
     }));
 
-    await axios.post(
+    const resp = await axios.post(
       'https://slack.com/api/chat.postMessage',
       {
         channel: SLACK_BROADCAST_CHANNEL_ID,
@@ -1098,6 +1099,8 @@ async function handleBroadcastMessage(event) {
       },
       { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
     );
+
+    console.log(JSON.stringify(resp));
   } catch (error) {
     console.error('❌ Error handling broadcast message:', error.message);
   }
