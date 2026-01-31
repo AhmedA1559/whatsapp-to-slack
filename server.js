@@ -1098,8 +1098,8 @@ async function handleBroadcastMessage(event) {
       { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
     );
 
-    console.log(resp.status);
-    console.log(resp.statusText);
+    console.log('📢 [Broadcast] Slack response:', JSON.stringify(resp.data));
+    console.log('📢 [Broadcast] Slack response:', resp.data.ok);
   } catch (error) {
     console.error('❌ Error handling broadcast message:', error.message);
   }
