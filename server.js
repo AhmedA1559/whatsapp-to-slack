@@ -1188,8 +1188,8 @@ function formatPhoneNumber(number) {
  */
 function formatContact(name, phone) {
   const formattedPhone = phone ? formatPhoneNumber(phone) : '';
-  if (!formattedPhone) return `${FSI}${name}${PDI}`;
-  return `${FSI}${name}${PDI} • ${LRI}${formattedPhone}${PDI}`;
+  if (!formattedPhone) return `${LRI}${FSI}${name}${PDI}${PDI}`;
+  return `${LRI}${FSI}${name}${PDI} • ${formattedPhone}${PDI}`;
 }
 
 /**
