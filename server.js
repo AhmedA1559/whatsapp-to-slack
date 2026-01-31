@@ -136,7 +136,12 @@ app.get('/contact/check', async (req, res) => {
     }
 
     const contactData = await redis.get(`contact:${phone}`);
-    res.json({ is_saved: !!contactData });
+    if (contactData) {
+      const contact = JSON.parse(contactData);
+      res.json({ is_saved: true, name: contact.name });
+    } else {
+      res.json({ is_saved: false });
+    }
   } catch (error) {
     console.error('❌ Error checking contact:', error.message);
     res.json({ is_saved: false });
@@ -163,10 +168,12 @@ app.post('/start', async (req, res) => {
 
     // Use saved contact name if available, otherwise WhatsApp profile name
     let profileName = params.PROFILE_NAME || 'Unknown';
+    let isSavedContact = false;
     if (phoneNumber) {
       const savedContact = await redis.get(`contact:${phoneNumber}`);
       if (savedContact) {
         profileName = JSON.parse(savedContact).name;
+        isSavedContact = true;
       }
     }
 
@@ -180,6 +187,7 @@ app.post('/start', async (req, res) => {
     let messageText = `${STRINGS.newRequest}\n\n`;
     messageText += `👤 *${profileName}*`;
     if (phoneNumber) messageText += ` • ${formatPhoneNumber(phoneNumber)}`;
+    if (isSavedContact) messageText += ` _(saved contact)_`;
     messageText += `\n`;
     if (intentType) messageText += `${intentType}`;
     if (intentType && schoolType) messageText += ` • `;
@@ -207,7 +215,7 @@ app.post('/start', async (req, res) => {
       },
     ];
 
-    if (phoneNumber) {
+    if (phoneNumber && !isSavedContact) {
       actionElements.push({
         type: 'button',
         text: { type: 'plain_text', text: STRINGS.saveContactButton },
