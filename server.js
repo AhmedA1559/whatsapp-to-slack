@@ -519,12 +519,14 @@ app.post('/slack/interactions', async (req, res) => {
         // Save contact to Redis
         await redis.set(`contact:${phone}`, JSON.stringify({ name, phone, saved_at: new Date().toISOString() }));
 
+        const channelId = meta.channel_id || SLACK_CHANNEL_ID;
+
         // Post confirmation in the thread
         if (meta.thread_ts) {
           await axios.post(
             'https://slack.com/api/chat.postMessage',
             {
-              channel: SLACK_CHANNEL_ID,
+              channel: channelId,
               thread_ts: meta.thread_ts,
               text: STRINGS.saveContactSaved.replace('{name}', name),
             },
@@ -535,6 +537,34 @@ app.post('/slack/interactions', async (req, res) => {
               },
             }
           );
+
+          // Remove the Save Contact button from the original message
+          if (meta.blocks) {
+            const updatedBlocks = meta.blocks.map(block => {
+              if (block.type === 'actions') {
+                return {
+                  ...block,
+                  elements: block.elements.filter(el => el.action_id !== 'save_contact'),
+                };
+              }
+              return block;
+            });
+
+            await axios.post(
+              'https://slack.com/api/chat.update',
+              {
+                channel: channelId,
+                ts: meta.thread_ts,
+                blocks: updatedBlocks,
+              },
+              {
+                headers: {
+                  'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+              }
+            );
+          }
         }
 
         console.log(`📇 Contact saved: ${name} (${phone})`);
@@ -555,6 +585,7 @@ app.post('/slack/interactions', async (req, res) => {
     if (action.action_id === 'save_contact') {
       const data = JSON.parse(action.value);
       const messageTs = payload.message.ts;
+      const channelId = payload.channel.id;
 
       // Check if contact already exists
       const existing = await redis.get(`contact:${data.phone}`);
@@ -567,7 +598,7 @@ app.post('/slack/interactions', async (req, res) => {
           view: {
             type: 'modal',
             callback_id: 'save_contact_modal',
-            private_metadata: JSON.stringify({ phone: data.phone, thread_ts: messageTs }),
+            private_metadata: JSON.stringify({ phone: data.phone, thread_ts: messageTs, channel_id: channelId, blocks: payload.message.blocks }),
             title: { type: 'plain_text', text: STRINGS.saveContactModalTitle },
             submit: { type: 'plain_text', text: 'Save' },
             close: { type: 'plain_text', text: 'Cancel' },
