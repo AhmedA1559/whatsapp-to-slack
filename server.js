@@ -1051,7 +1051,6 @@ async function handleBroadcastMessage(event) {
         'https://slack.com/api/chat.postMessage',
         {
           channel: SLACK_BROADCAST_CHANNEL_ID,
-          thread_ts: event.ts,
           text: STRINGS.homeNoRoles,
         },
         { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
@@ -1069,7 +1068,6 @@ async function handleBroadcastMessage(event) {
       'https://slack.com/api/chat.postMessage',
       {
         channel: SLACK_BROADCAST_CHANNEL_ID,
-        thread_ts: event.ts,
         text: STRINGS.broadcastSelectRoles,
         blocks: [
           {
