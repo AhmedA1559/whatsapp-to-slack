@@ -47,6 +47,7 @@ const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
 const AI_STUDIO_KEY = process.env.AI_STUDIO_KEY;
 const AI_STUDIO_REGION = process.env.AI_STUDIO_REGION || 'eu';
+const SLACK_BROADCAST_CHANNEL_ID = process.env.SLACK_BROADCAST_CHANNEL_ID;
 
 // AI Studio API base URL based on region
 const AI_STUDIO_BASE_URL = `https://studio-api-${AI_STUDIO_REGION}.ai.vonage.com`;
@@ -106,6 +107,29 @@ const STRINGS = {
   busyMessage3Min: 'Thank you for your patience. Our team is currently busy and will be with you shortly.',
   busyMessage10Min: 'We apologize for the delay. Our team is experiencing high volume but we haven\'t forgotten about you. Someone will be with you as soon as possible.',
   busyNotice: '⏱️ _Auto-message sent to customer:_ "{message}"',
+
+  // Broadcast
+  broadcastSelectRoles: 'Select roles to broadcast this message to:',
+  broadcastSendButton: 'Send Broadcast',
+  broadcastSending: '📡 _Sending broadcast..._',
+  broadcastSent: '📡 *Broadcast sent to {count} contacts*',
+  broadcastNoContacts: '⚠️ No contacts found with the selected roles.',
+  broadcastStub: '📡 _[Stub] Would send to {phone} ({name}): "{message}"_',
+
+  // App Home
+  homeTitle: 'Contacts & Roles',
+  homeRolesHeader: 'Roles',
+  homeContactsHeader: 'Contacts',
+  homeAddRoleButton: 'Add Role',
+  homeAddRoleModalTitle: 'Add Role',
+  homeAddRoleLabel: 'Role Name',
+  homeEditRolesButton: 'Edit Roles',
+  homeEditRolesModalTitle: 'Edit Contact Roles',
+  homeEditRolesLabel: 'Roles',
+  homeNoRoles: '_No roles defined yet. Add one to get started._',
+  homeNoContacts: '_No saved contacts yet._',
+  homeRemoveRoleConfirmTitle: 'Remove Role',
+  homeRemoveRoleConfirmText: 'This will remove the role from all contacts. Are you sure?',
 };
 
 // Middleware
@@ -521,8 +545,26 @@ app.post('/slack/events', async (req, res) => {
     const event = req.body.event;
     if (!event) return;
 
-    // Handle message events (for auto-reply)
+    // Handle App Home tab opened
+    if (event.type === 'app_home_opened' && event.tab === 'home') {
+      await publishHomeTab(event.user);
+      return;
+    }
+
+    // Handle message events
     if (event.type === 'message') {
+      // Broadcast channel: non-threaded messages from humans trigger broadcast flow
+      if (
+        SLACK_BROADCAST_CHANNEL_ID &&
+        event.channel === SLACK_BROADCAST_CHANNEL_ID &&
+        !event.bot_id &&
+        event.subtype !== 'bot_message' &&
+        !event.thread_ts
+      ) {
+        await handleBroadcastMessage(event);
+        return;
+      }
+
       await handleMessage(event);
       return;
     }
@@ -603,6 +645,39 @@ app.post('/slack/interactions', async (req, res) => {
         console.log(`📇 Contact saved: ${name} (${phone})`);
         return res.status(200).json({ response_action: 'clear' });
       }
+      // Handle "Add Role" modal submission
+      if (callbackId === 'add_role_modal') {
+        const roleName = payload.view.state.values.role_name_block.role_name_input.value.trim().toLowerCase();
+        if (roleName) {
+          await redis.sAdd('roles', roleName);
+          console.log(`🏷️ Role added: ${roleName}`);
+        }
+        // Refresh Home tab for the user
+        await publishHomeTab(payload.user.id);
+        return res.status(200).json({ response_action: 'clear' });
+      }
+
+      // Handle "Edit Contact Roles" modal submission
+      if (callbackId === 'edit_contact_roles_modal') {
+        const meta = JSON.parse(payload.view.private_metadata);
+        const phone = meta.phone;
+        const selectedRoles = payload.view.state.values.contact_roles_block?.contact_roles_select?.selected_options || [];
+        const roles = selectedRoles.map(o => o.value);
+
+        // Update contact in Redis
+        const contactData = await redis.get(`contact:${phone}`);
+        if (contactData) {
+          const contact = JSON.parse(contactData);
+          contact.roles = roles;
+          await redis.set(`contact:${phone}`, JSON.stringify(contact));
+          console.log(`🏷️ Roles updated for ${contact.name} (${phone}): ${roles.join(', ') || 'none'}`);
+        }
+
+        // Refresh Home tab
+        await publishHomeTab(payload.user.id);
+        return res.status(200).json({ response_action: 'clear' });
+      }
+
       return res.status(200).send('');
     }
 
@@ -613,6 +688,179 @@ app.post('/slack/interactions', async (req, res) => {
 
     const action = payload.actions?.[0];
     if (!action) return;
+
+    // Handle "Add Role" button from App Home
+    if (action.action_id === 'add_role') {
+      await axios.post(
+        'https://slack.com/api/views.open',
+        {
+          trigger_id: payload.trigger_id,
+          view: {
+            type: 'modal',
+            callback_id: 'add_role_modal',
+            title: { type: 'plain_text', text: STRINGS.homeAddRoleModalTitle },
+            submit: { type: 'plain_text', text: 'Add' },
+            close: { type: 'plain_text', text: 'Cancel' },
+            blocks: [
+              {
+                type: 'input',
+                block_id: 'role_name_block',
+                label: { type: 'plain_text', text: STRINGS.homeAddRoleLabel },
+                element: {
+                  type: 'plain_text_input',
+                  action_id: 'role_name_input',
+                  placeholder: { type: 'plain_text', text: 'e.g. academy-level-1' },
+                },
+              },
+            ],
+          },
+        },
+        { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      return;
+    }
+
+    // Handle "Remove Role" button from App Home
+    if (action.action_id === 'remove_role') {
+      const roleName = action.value;
+      // Remove from roles set
+      await redis.sRem('roles', roleName);
+      // Remove from all contacts
+      const contacts = await getAllContacts();
+      for (const contact of contacts) {
+        if (contact.roles.includes(roleName)) {
+          contact.roles = contact.roles.filter(r => r !== roleName);
+          await redis.set(`contact:${contact.phone}`, JSON.stringify(contact));
+        }
+      }
+      console.log(`🏷️ Role removed: ${roleName}`);
+      await publishHomeTab(payload.user.id);
+      return;
+    }
+
+    // Handle "Edit Roles" button from App Home
+    if (action.action_id === 'edit_contact_roles') {
+      const phone = action.value;
+      const contactData = await redis.get(`contact:${phone}`);
+      if (!contactData) return;
+      const contact = JSON.parse(contactData);
+      const contactRoles = contact.roles || [];
+      const allRoles = await getAllRoles();
+
+      const roleOptions = allRoles.map(r => ({
+        text: { type: 'plain_text', text: r },
+        value: r,
+      }));
+
+      const initialOptions = roleOptions.filter(o => contactRoles.includes(o.value));
+
+      const modalBlocks = [];
+      if (roleOptions.length > 0) {
+        const element = {
+          type: 'multi_static_select',
+          action_id: 'contact_roles_select',
+          placeholder: { type: 'plain_text', text: 'Select roles...' },
+          options: roleOptions,
+        };
+        if (initialOptions.length > 0) {
+          element.initial_options = initialOptions;
+        }
+        modalBlocks.push({
+          type: 'input',
+          block_id: 'contact_roles_block',
+          label: { type: 'plain_text', text: STRINGS.homeEditRolesLabel },
+          optional: true,
+          element,
+        });
+      } else {
+        modalBlocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: STRINGS.homeNoRoles },
+        });
+      }
+
+      await axios.post(
+        'https://slack.com/api/views.open',
+        {
+          trigger_id: payload.trigger_id,
+          view: {
+            type: 'modal',
+            callback_id: 'edit_contact_roles_modal',
+            private_metadata: JSON.stringify({ phone }),
+            title: { type: 'plain_text', text: STRINGS.homeEditRolesModalTitle },
+            submit: { type: 'plain_text', text: 'Save' },
+            close: { type: 'plain_text', text: 'Cancel' },
+            blocks: modalBlocks,
+          },
+        },
+        { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      return;
+    }
+
+    // Handle "Send Broadcast" button
+    if (action.action_id === 'send_broadcast') {
+      const originalMessageTs = action.value;
+      const channelId = payload.channel.id;
+      const botMessageTs = payload.message.ts;
+
+      // Get selected roles from the multi_static_select in the same message
+      const selectState = payload.state?.values?.broadcast_actions?.broadcast_role_select;
+      const selectedRoles = selectState?.selected_options?.map(o => o.value) || [];
+
+      if (selectedRoles.length === 0) {
+        await axios.post(
+          'https://slack.com/api/chat.postMessage',
+          {
+            channel: channelId,
+            thread_ts: originalMessageTs,
+            text: '⚠️ Please select at least one role first.',
+          },
+          { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        return;
+      }
+
+      // Fetch the original message text
+      const historyResp = await axios.get(
+        `https://slack.com/api/conversations.history?channel=${channelId}&latest=${originalMessageTs}&inclusive=true&limit=1`,
+        { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` } }
+      );
+      const originalMessage = historyResp.data.messages?.[0]?.text || '';
+
+      // Update the bot's message to show "sending..."
+      await axios.post(
+        'https://slack.com/api/chat.update',
+        {
+          channel: channelId,
+          ts: botMessageTs,
+          text: STRINGS.broadcastSending,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: STRINGS.broadcastSending } }],
+        },
+        { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+
+      // Send the broadcast
+      const count = await sendBroadcast(originalMessage, selectedRoles, channelId, originalMessageTs);
+
+      // Update with results
+      const resultText = count > 0
+        ? STRINGS.broadcastSent.replace('{count}', count)
+        : STRINGS.broadcastNoContacts;
+      const roleList = selectedRoles.map(r => `\`${r}\``).join(', ');
+
+      await axios.post(
+        'https://slack.com/api/chat.update',
+        {
+          channel: channelId,
+          ts: botMessageTs,
+          text: resultText,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${resultText}\nRoles: ${roleList}` } }],
+        },
+        { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      return;
+    }
 
     // Handle "Save Contact" — open a modal
     if (action.action_id === 'save_contact') {
@@ -785,6 +1033,70 @@ async function handleMessage(event) {
 }
 
 /**
+ * Handle a message posted in the broadcast channel.
+ * Replies with a role-selector and "Send Broadcast" button.
+ */
+async function handleBroadcastMessage(event) {
+  try {
+    const roles = await getAllRoles();
+    if (roles.length === 0) {
+      await axios.post(
+        'https://slack.com/api/chat.postMessage',
+        {
+          channel: SLACK_BROADCAST_CHANNEL_ID,
+          thread_ts: event.ts,
+          text: STRINGS.homeNoRoles,
+        },
+        { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      return;
+    }
+
+    const roleOptions = roles.map(r => ({
+      text: { type: 'plain_text', text: r },
+      value: r,
+    }));
+
+    await axios.post(
+      'https://slack.com/api/chat.postMessage',
+      {
+        channel: SLACK_BROADCAST_CHANNEL_ID,
+        thread_ts: event.ts,
+        text: STRINGS.broadcastSelectRoles,
+        blocks: [
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: STRINGS.broadcastSelectRoles },
+          },
+          {
+            type: 'actions',
+            block_id: 'broadcast_actions',
+            elements: [
+              {
+                type: 'multi_static_select',
+                action_id: 'broadcast_role_select',
+                placeholder: { type: 'plain_text', text: 'Choose roles...' },
+                options: roleOptions,
+              },
+              {
+                type: 'button',
+                text: { type: 'plain_text', text: STRINGS.broadcastSendButton },
+                style: 'primary',
+                action_id: 'send_broadcast',
+                value: event.ts, // original message ts to retrieve the text
+              },
+            ],
+          },
+        ],
+      },
+      { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (error) {
+    console.error('❌ Error handling broadcast message:', error.message);
+  }
+}
+
+/**
  * Handle file uploads from Slack - upload to Cloudinary and send to WhatsApp
  */
 async function handleFileUpload(file, session, threadTs, caption) {
@@ -880,6 +1192,137 @@ function extractParameters(parameters = []) {
     }
   }
   return result;
+}
+
+// ============================================
+// Contacts & Roles Management
+// ============================================
+
+/**
+ * Get all saved contacts from Redis
+ */
+async function getAllContacts() {
+  const keys = await redis.keys('contact:*');
+  const contacts = [];
+  for (const key of keys) {
+    const data = await redis.get(key);
+    if (data) {
+      const contact = JSON.parse(data);
+      if (!contact.roles) contact.roles = [];
+      contacts.push(contact);
+    }
+  }
+  contacts.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  return contacts;
+}
+
+/**
+ * Get all available roles from Redis
+ */
+async function getAllRoles() {
+  const roles = await redis.sMembers('roles');
+  return roles.sort();
+}
+
+/**
+ * Publish the App Home tab for a given user
+ */
+async function publishHomeTab(userId) {
+  const roles = await getAllRoles();
+  const contacts = await getAllContacts();
+
+  const blocks = [];
+
+  // --- Roles Section ---
+  blocks.push(
+    { type: 'header', text: { type: 'plain_text', text: STRINGS.homeRolesHeader } },
+  );
+
+  if (roles.length === 0) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: STRINGS.homeNoRoles } });
+  } else {
+    for (const role of roles) {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `\`${role}\`` },
+        accessory: {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Remove' },
+          style: 'danger',
+          action_id: 'remove_role',
+          value: role,
+          confirm: {
+            title: { type: 'plain_text', text: STRINGS.homeRemoveRoleConfirmTitle },
+            text: { type: 'mrkdwn', text: STRINGS.homeRemoveRoleConfirmText },
+            confirm: { type: 'plain_text', text: 'Remove' },
+            deny: { type: 'plain_text', text: 'Cancel' },
+          },
+        },
+      });
+    }
+  }
+
+  blocks.push({
+    type: 'actions',
+    elements: [
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: STRINGS.homeAddRoleButton },
+        action_id: 'add_role',
+      },
+    ],
+  });
+
+  blocks.push({ type: 'divider' });
+
+  // --- Contacts Section ---
+  blocks.push(
+    { type: 'header', text: { type: 'plain_text', text: STRINGS.homeContactsHeader } },
+  );
+
+  if (contacts.length === 0) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: STRINGS.homeNoContacts } });
+  } else {
+    for (const contact of contacts) {
+      const roleTags = contact.roles.length > 0
+        ? contact.roles.map(r => `\`${r}\``).join(' ')
+        : '_no roles_';
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*${contact.name}* • ${formatPhoneNumber(contact.phone)}\n${roleTags}`,
+        },
+        accessory: {
+          type: 'button',
+          text: { type: 'plain_text', text: STRINGS.homeEditRolesButton },
+          action_id: 'edit_contact_roles',
+          value: contact.phone,
+        },
+      });
+    }
+  }
+
+  // Slack limits blocks to 100 per view — truncate if needed
+  const maxBlocks = 100;
+  const viewBlocks = blocks.slice(0, maxBlocks);
+
+  await axios.post(
+    'https://slack.com/api/views.publish',
+    {
+      user_id: userId,
+      view: {
+        type: 'home',
+        blocks: viewBlocks,
+      },
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
 }
 
 // ============================================
@@ -1026,6 +1469,49 @@ async function sendBusyMessage(sessionId, message) {
 }
 
 // ============================================
+// Broadcast
+// ============================================
+
+/**
+ * Send a broadcast message to all contacts matching the given roles.
+ * Returns the number of contacts sent to.
+ */
+async function sendBroadcast(message, selectedRoles, channelId, threadTs) {
+  const contacts = await getAllContacts();
+  const matched = contacts.filter(c =>
+    c.roles && c.roles.some(r => selectedRoles.includes(r))
+  );
+
+  if (matched.length === 0) return 0;
+
+  for (const contact of matched) {
+    await sendWhatsAppBroadcast(contact.phone, contact.name, message, channelId, threadTs);
+  }
+
+  return matched.length;
+}
+
+/**
+ * Send a WhatsApp message to a single contact (broadcast).
+ * STUB: Replace with Vonage Messages API or template API when ready.
+ */
+async function sendWhatsAppBroadcast(phone, name, message, channelId, threadTs) {
+  // TODO: Replace with actual WhatsApp send via Vonage Messages API
+  console.log(`📡 [Broadcast Stub] Would send to ${phone} (${name}): "${message}"`);
+
+  // Post a log message in the broadcast thread
+  await axios.post(
+    'https://slack.com/api/chat.postMessage',
+    {
+      channel: channelId,
+      thread_ts: threadTs,
+      text: STRINGS.broadcastStub.replace('{phone}', formatPhoneNumber(phone)).replace('{name}', name).replace('{message}', message),
+    },
+    { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+  );
+}
+
+// ============================================
 // Redis Session Management
 // ============================================
 
@@ -1090,11 +1576,15 @@ async function startServer() {
 ║  Endpoints:                                               ║
 ║  • POST /start         - AI Studio live agent start       ║
 ║  • POST /inbound       - AI Studio inbound messages       ║
-║  • POST /slack/events  - Slack Events API                 ║
+║  • POST /slack/events  - Slack Events + App Home          ║
 ║  • POST /slack/interactions - Slack interactive buttons   ║
 ║  • POST /slack/assign  - Assignment slash command         ║
 ║  • GET  /health        - Health check                     ║
 ║  • GET  /contact/check - Check if contact exists          ║
+╠═══════════════════════════════════════════════════════════╣
+║  Features:                                                ║
+║  • App Home tab - Contact & role management               ║
+║  • Broadcast channel - Send messages by role              ║
 ╚═══════════════════════════════════════════════════════════╝
     `);
   });
