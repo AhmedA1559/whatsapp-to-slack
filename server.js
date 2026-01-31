@@ -559,6 +559,7 @@ app.post('/slack/events', async (req, res) => {
     // Handle message events
     if (event.type === 'message') {
       // Broadcast channel: non-threaded messages from humans trigger broadcast flow
+      console.log(`📨 [Broadcast Check] SLACK_BROADCAST_CHANNEL_ID="${SLACK_BROADCAST_CHANNEL_ID}" event.channel="${event.channel}" match=${event.channel === SLACK_BROADCAST_CHANNEL_ID}`);
       if (
         SLACK_BROADCAST_CHANNEL_ID &&
         event.channel === SLACK_BROADCAST_CHANNEL_ID &&
@@ -1043,6 +1044,7 @@ async function handleMessage(event) {
  */
 async function handleBroadcastMessage(event) {
   try {
+    console.log('📢 Handling broadcast message');
     const roles = await getAllRoles();
     if (roles.length === 0) {
       await axios.post(
