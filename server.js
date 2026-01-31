@@ -678,24 +678,38 @@ app.post('/slack/interactions', async (req, res) => {
       text: STRINGS.ticketClosed,
     });
 
-    // Update the original message to remove the buttons
+    // Update the original message: remove Close Ticket button but keep Save Contact
     const originalText = payload.message.blocks?.[0]?.text?.text || payload.message.text;
+    const updatedBlocks = [
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: originalText },
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: STRINGS.ticketClosed },
+      },
+    ];
+
+    // Preserve the Save Contact button if it exists
+    const actionsBlock = payload.message.blocks?.find(b => b.type === 'actions');
+    if (actionsBlock) {
+      const saveContactBtn = actionsBlock.elements?.find(el => el.action_id === 'save_contact');
+      if (saveContactBtn) {
+        updatedBlocks.push({
+          type: 'actions',
+          elements: [saveContactBtn],
+        });
+      }
+    }
+
     await axios.post(
       'https://slack.com/api/chat.update',
       {
         channel: channelId,
         ts: messageTs,
         text: originalText,
-        blocks: [
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: originalText },
-          },
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: STRINGS.ticketClosed },
-          },
-        ],
+        blocks: updatedBlocks,
       },
       {
         headers: {
