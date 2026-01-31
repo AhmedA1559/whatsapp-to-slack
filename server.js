@@ -1072,24 +1072,24 @@ async function handleBroadcastMessage(event) {
         blocks: [
           {
             type: 'section',
+            block_id: 'broadcast_actions',
             text: { type: 'mrkdwn', text: STRINGS.broadcastSelectRoles },
+            accessory: {
+              type: 'multi_static_select',
+              action_id: 'broadcast_role_select',
+              placeholder: { type: 'plain_text', text: 'Choose roles...' },
+              options: roleOptions,
+            },
           },
           {
             type: 'actions',
-            block_id: 'broadcast_actions',
             elements: [
-              {
-                type: 'multi_static_select',
-                action_id: 'broadcast_role_select',
-                placeholder: { type: 'plain_text', text: 'Choose roles...' },
-                options: roleOptions,
-              },
               {
                 type: 'button',
                 text: { type: 'plain_text', text: STRINGS.broadcastSendButton },
                 style: 'primary',
                 action_id: 'send_broadcast',
-                value: event.ts, // original message ts to retrieve the text
+                value: event.ts,
               },
             ],
           },
