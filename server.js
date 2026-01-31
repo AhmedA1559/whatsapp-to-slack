@@ -209,8 +209,7 @@ app.post('/start', async (req, res) => {
     const assigneeIds = await getAssignees(school, intent);
 
     let messageText = `${STRINGS.newRequest}\n\n`;
-    messageText += `👤 *${profileName}*`;
-    if (phoneNumber) messageText += ` • ${formatPhoneNumber(phoneNumber)}`;
+    messageText += `👤 *${formatContact(profileName, phoneNumber)}*`;
     if (isSavedContact) messageText += ` _(saved contact)_`;
     messageText += `\n`;
     if (intentType) messageText += `${intentType}`;
@@ -1169,6 +1168,11 @@ async function handleFileUpload(file, session, threadTs, caption) {
 // Helper Functions
 // ============================================
 
+// Unicode directional isolate characters for RTL/LTR mixing
+const FSI = '\u2068';  // First Strong Isolate (auto-detect direction)
+const LRI = '\u2066';  // Left-to-Right Isolate
+const PDI = '\u2069';  // Pop Directional Isolate
+
 /**
  * Format a phone number for display using libphonenumber-js
  */
@@ -1177,6 +1181,15 @@ function formatPhoneNumber(number) {
   const phone = parsePhoneNumberFromString('+' + number.replace(/\D/g, ''));
   if (phone) return phone.formatInternational();
   return number;
+}
+
+/**
+ * Format a name + phone string safe for mixed RTL/LTR display
+ */
+function formatContact(name, phone) {
+  const formattedPhone = phone ? formatPhoneNumber(phone) : '';
+  if (!formattedPhone) return `${FSI}${name}${PDI}`;
+  return `${FSI}${name}${PDI} • ${LRI}${formattedPhone}${PDI}`;
 }
 
 /**
@@ -1291,7 +1304,7 @@ async function publishHomeTab(userId) {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*${contact.name}* • ${formatPhoneNumber(contact.phone)}\n${roleTags}`,
+          text: `*${formatContact(contact.name, contact.phone)}*\n${roleTags}`,
         },
         accessory: {
           type: 'button',
@@ -1505,7 +1518,7 @@ async function sendWhatsAppBroadcast(phone, name, message, channelId, threadTs) 
     {
       channel: channelId,
       thread_ts: threadTs,
-      text: STRINGS.broadcastStub.replace('{phone}', formatPhoneNumber(phone)).replace('{name}', name).replace('{message}', message),
+      text: STRINGS.broadcastStub.replace('{phone}', `${LRI}${formatPhoneNumber(phone)}${PDI}`).replace('{name}', `${FSI}${name}${PDI}`).replace('{message}', message),
     },
     { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
   );
