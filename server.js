@@ -119,6 +119,31 @@ app.get('/health', async (req, res) => {
 });
 
 /**
+ * /contact/check - Check if a phone number has a saved contact
+ *
+ * Query params:
+ *   phone - The phone number to check (required)
+ *
+ * Returns:
+ *   "true" or "false" (plain text)
+ */
+app.get('/contact/check', async (req, res) => {
+  try {
+    const phone = req.query.phone;
+    console.log(`🔍 Checking contact for phone number: ${phone}`);
+    if (!phone) {
+      return res.send('false');
+    }
+
+    const contactData = await redis.get(`contact:${phone}`);
+    res.send(contactData ? 'true' : 'false');
+  } catch (error) {
+    console.error('❌ Error checking contact:', error.message);
+    res.send('false');
+  }
+});
+
+/**
  * /start - Called by AI Studio when live agent routing begins
  *
  * This endpoint is triggered when a WhatsApp user requests human support.
@@ -1047,6 +1072,7 @@ async function startServer() {
 ║  • POST /slack/interactions - Slack interactive buttons   ║
 ║  • POST /slack/assign  - Assignment slash command         ║
 ║  • GET  /health        - Health check                     ║
+║  • GET  /contact/check - Check if contact exists          ║
 ╚═══════════════════════════════════════════════════════════╝
     `);
   });
