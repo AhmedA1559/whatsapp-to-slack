@@ -48,6 +48,9 @@ const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
 const AI_STUDIO_KEY = process.env.AI_STUDIO_KEY;
 const AI_STUDIO_REGION = process.env.AI_STUDIO_REGION || 'eu';
 const SLACK_BROADCAST_CHANNEL_ID = process.env.SLACK_BROADCAST_CHANNEL_ID;
+const VONAGE_API_KEY = process.env.VONAGE_API_KEY;
+const VONAGE_API_SECRET = process.env.VONAGE_API_SECRET;
+const VONAGE_WHATSAPP_NUMBER = process.env.VONAGE_WHATSAPP_NUMBER;
 
 // AI Studio API base URL based on region
 const AI_STUDIO_BASE_URL = `https://studio-api-${AI_STUDIO_REGION}.ai.vonage.com`;
@@ -114,7 +117,8 @@ const STRINGS = {
   broadcastSending: '📡 _Sending broadcast..._',
   broadcastSent: '📡 *Broadcast sent to {count} contacts*',
   broadcastNoContacts: '⚠️ No contacts found with the selected roles.',
-  broadcastStub: '📡 _[Stub] Would send to {phone} ({name}): "{message}"_',
+  broadcastSentTo: '✅ Sent to {phone} ({name})',
+  broadcastFailedTo: '❌ Failed to send to {phone} ({name}): {error}',
 
   // App Home
   homeTitle: 'Contacts & Roles',
@@ -1505,23 +1509,53 @@ async function sendBroadcast(message, selectedRoles, channelId, threadTs) {
 }
 
 /**
- * Send a WhatsApp message to a single contact (broadcast).
- * STUB: Replace with Vonage Messages API or template API when ready.
+ * Send a WhatsApp message to a single contact via Vonage Messages API.
  */
 async function sendWhatsAppBroadcast(phone, name, message, channelId, threadTs) {
-  // TODO: Replace with actual WhatsApp send via Vonage Messages API
-  console.log(`📡 [Broadcast Stub] Would send to ${phone} (${name}): "${message}"`);
+  const formattedPhone = `${LRI}${formatPhoneNumber(phone)}${PDI}`;
+  const formattedName = `${FSI}${name}${PDI}`;
 
-  // Post a log message in the broadcast thread
-  await axios.post(
-    'https://slack.com/api/chat.postMessage',
-    {
-      channel: channelId,
-      thread_ts: threadTs,
-      text: STRINGS.broadcastStub.replace('{phone}', `${LRI}${formatPhoneNumber(phone)}${PDI}`).replace('{name}', `${FSI}${name}${PDI}`).replace('{message}', message),
-    },
-    { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
+  try {
+    await axios.post(
+      'https://api.nexmo.com/v1/messages',
+      {
+        message_type: 'text',
+        text: message,
+        to: phone,
+        from: VONAGE_WHATSAPP_NUMBER,
+        channel: 'whatsapp',
+      },
+      {
+        auth: { username: VONAGE_API_KEY, password: VONAGE_API_SECRET },
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+
+    console.log(`📡 [Broadcast] Sent to ${phone} (${name})`);
+
+    await axios.post(
+      'https://slack.com/api/chat.postMessage',
+      {
+        channel: channelId,
+        thread_ts: threadTs,
+        text: STRINGS.broadcastSentTo.replace('{phone}', formattedPhone).replace('{name}', formattedName),
+      },
+      { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (error) {
+    const errMsg = error.response?.data?.title || error.message || 'Unknown error';
+    console.error(`❌ [Broadcast] Failed to send to ${phone} (${name}):`, errMsg);
+
+    await axios.post(
+      'https://slack.com/api/chat.postMessage',
+      {
+        channel: channelId,
+        thread_ts: threadTs,
+        text: STRINGS.broadcastFailedTo.replace('{phone}', formattedPhone).replace('{name}', formattedName).replace('{error}', errMsg),
+      },
+      { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  }
 }
 
 // ============================================
