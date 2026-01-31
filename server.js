@@ -22,6 +22,7 @@ const axios = require('axios');
 const cloudinary = require('cloudinary').v2;
 const { createClient } = require('redis');
 const { parsePhoneNumberFromString } = require('libphonenumber-js');
+const crypto = require('crypto');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -48,8 +49,8 @@ const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
 const AI_STUDIO_KEY = process.env.AI_STUDIO_KEY;
 const AI_STUDIO_REGION = process.env.AI_STUDIO_REGION || 'eu';
 const SLACK_BROADCAST_CHANNEL_ID = process.env.SLACK_BROADCAST_CHANNEL_ID;
-const VONAGE_API_KEY = process.env.VONAGE_API_KEY;
-const VONAGE_API_SECRET = process.env.VONAGE_API_SECRET;
+const VONAGE_APPLICATION_ID = process.env.VONAGE_APPLICATION_ID;
+const VONAGE_PRIVATE_KEY = process.env.VONAGE_PRIVATE_KEY;
 const VONAGE_WHATSAPP_NUMBER = process.env.VONAGE_WHATSAPP_NUMBER;
 
 // AI Studio API base URL based on region
@@ -1515,6 +1516,28 @@ async function sendBroadcast(message, selectedRoles, channelId, threadTs) {
 }
 
 /**
+ * Generate a Vonage JWT for Messages API authentication.
+ */
+function generateVonageJWT() {
+  const header = { typ: 'JWT', alg: 'RS256' };
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    iat: now,
+    exp: now + 86400,
+    jti: crypto.randomUUID(),
+    application_id: VONAGE_APPLICATION_ID,
+    sub: '',
+    acl: '',
+  };
+
+  const encode = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const signingInput = `${encode(header)}.${encode(payload)}`;
+  const privateKey = VONAGE_PRIVATE_KEY.replace(/\\n/g, '\n');
+  const signature = crypto.sign('RSA-SHA256', Buffer.from(signingInput), privateKey).toString('base64url');
+  return `${signingInput}.${signature}`;
+}
+
+/**
  * Send a WhatsApp message to a single contact via Vonage Messages API.
  */
 async function sendWhatsAppBroadcast(phone, name, message, channelId, threadTs) {
@@ -1522,6 +1545,7 @@ async function sendWhatsAppBroadcast(phone, name, message, channelId, threadTs) 
   const formattedName = `${FSI}${name}${PDI}`;
 
   try {
+    const token = generateVonageJWT();
     await axios.post(
       'https://api.nexmo.com/v1/messages',
       {
@@ -1532,8 +1556,11 @@ async function sendWhatsAppBroadcast(phone, name, message, channelId, threadTs) 
         channel: 'whatsapp',
       },
       {
-        auth: { username: VONAGE_API_KEY, password: VONAGE_API_SECRET },
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
       }
     );
 
